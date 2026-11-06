@@ -755,7 +755,7 @@ function seedCgUsers_(markExistingForFirstLogin) {
     const username = String(displayName).trim().toLowerCase();
     const current = usersByUsername[username];
     if (current) {
-      if (markExistingForFirstLogin && !isTruthy_(current.MustChangePassword)) updateById_('USERS','UserID',current.UserID,{MustChangePassword:true,UpdatedAt:new Date()});
+      if (markExistingForFirstLogin) updateById_('USERS','UserID',current.UserID,{Role:'cg',Status:'active',MustChangePassword:true,UpdatedAt:new Date()});
       return;
     }
     const salt = makeSalt_();
