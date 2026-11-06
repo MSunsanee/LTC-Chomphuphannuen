@@ -6,14 +6,14 @@
  */
 
 const APP = {
-  VERSION: '1.5.0',
+  VERSION: '1.6.0',
   TZ: 'Asia/Bangkok',
   SESSION_HOURS: 8,
   DEFAULT_ADMIN: 'admin',
   DEFAULT_PASSWORD: '1234',
   SHEETS: {
     SETTINGS: ['Key','Value','UpdatedAt','UpdatedBy'],
-    USERS: ['UserID','Username','PasswordHash','Salt','DisplayName','Role','Status','LastLogin','CreatedAt','UpdatedAt'],
+    USERS: ['UserID','Username','PasswordHash','Salt','DisplayName','Role','Status','LastLogin','CreatedAt','UpdatedAt','MustChangePassword'],
     SESSIONS: ['Token','UserID','Username','Role','CreatedAt','ExpiresAt','LastSeen','Status'],
     PATIENTS: ['PatientID','CitizenID','Prefix','FirstName','LastName','BirthDate','Age','Sex','Phone','Address','Village','Subdistrict','District','Province','Latitude','Longitude','CareRight','ADLScore','PatientGroup','DependencyLevel','RiskLevel','Status','CM','CG','PrimaryCaregiver','CaregiverPhone','Diseases','DrugAllergy','Medications','StartDate','LastVisit','NextVisit','Consent','Notes','CreatedAt','CreatedBy','UpdatedAt','UpdatedBy'],
     ASSESSMENTS: ['AssessmentID','PatientID','AssessmentDate','AssessmentType','ADLScore','DependencyLevel','FallRisk','PressureSoreRisk','NutritionRisk','Cognition','Depression','PainScore','CaregiverBurden','EnvironmentRisk','Summary','Assessor','CreatedAt','CreatedBy','FallRiskScore','NutritionScore','SuicideRisk','Advice','AssessmentData','UpdatedAt','UpdatedBy'],
@@ -69,6 +69,8 @@ const CONTRACT_MASTER_DEFAULTS = {
 
 const CONTRACT_MASTER_KEYS = Object.keys(CONTRACT_MASTER_DEFAULTS);
 
+const DEFAULT_CG_USERS = ['งามฉัตร','สุลาวรรณ','บุญจัน','สันดอน','อัมพร','แสงจันทร์','จงกล','ศิราณี'];
+
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('ระบบ LTC')
     .addItem('ติดตั้ง/ซ่อมแซมโครงสร้างระบบ', 'setupSystem')
@@ -83,6 +85,7 @@ function setupSystem() {
   Object.keys(APP.SHEETS).forEach(name => ensureSheet_(ss, name, APP.SHEETS[name]));
   seedSettings_();
   seedAdmin_();
+  seedCgUsers_();
   seedCodebook_();
   SpreadsheetApp.flush();
   clearAllDataCaches_();
@@ -98,11 +101,13 @@ function ensureSystemReady_() {
   const patients = ss.getSheetByName('PATIENTS');
   const assessments = ss.getSheetByName('ASSESSMENTS');
   const staff = ss.getSheetByName('STAFF');
+  const users = ss.getSheetByName('USERS');
   const missingCore = !patients || !ss.getSheetByName('USERS') || !ss.getSheetByName('SESSIONS');
   const missingPatientGroup = patients && !patients.getRange(1,1,1,Math.max(patients.getLastColumn(),1)).getValues()[0].includes('PatientGroup');
   const missingAssessmentData = assessments && !assessments.getRange(1,1,1,Math.max(assessments.getLastColumn(),1)).getValues()[0].includes('AssessmentData');
   const missingStaffCitizenId = staff && !staff.getRange(1,1,1,Math.max(staff.getLastColumn(),1)).getValues()[0].includes('CitizenID');
-  if (missingCore || !assessments || !staff || !ss.getSheetByName('CONTRACTS') || missingPatientGroup || missingAssessmentData || missingStaffCitizenId) setupSystem();
+  const missingMustChangePassword = users && !users.getRange(1,1,1,Math.max(users.getLastColumn(),1)).getValues()[0].includes('MustChangePassword');
+  if (missingCore || !assessments || !staff || !ss.getSheetByName('CONTRACTS') || missingPatientGroup || missingAssessmentData || missingStaffCitizenId || missingMustChangePassword) setupSystem();
   cache.put(readyCacheKey_(), '1', PERFORMANCE.READY_TTL);
 }
 
@@ -132,16 +137,20 @@ function route_(action, payload, event) {
 
   const auth = requireAuth_(payload.token);
   touchSession_(payload.token);
-  const ctx = { username: auth.Username, role: auth.Role, userId: auth.UserID, ip: clientIp_(event) };
+  const ctx = { username: auth.Username, displayName: auth.DisplayName || auth.Username, role: auth.Role, userId: auth.UserID, token: payload.token, mustChangePassword: isTruthy_(auth.MustChangePassword), ip: clientIp_(event) };
+
+  if (ctx.mustChangePassword && !['bootstrap','me','changePassword','logout'].includes(action)) {
+    throw new Error('กรุณาตั้งรหัสผ่านใหม่ก่อนใช้งานระบบ');
+  }
 
   switch (action) {
-    case 'bootstrap': return { ok:true, user:{username:ctx.username,role:ctx.role,displayName:auth.DisplayName||ctx.username}, data:dashboard_(ctx,false).data };
-    case 'me': return { ok: true, user: { username: ctx.username, role: ctx.role, displayName: auth.DisplayName || ctx.username } };
+    case 'bootstrap': return { ok:true, user:userSummary_(auth), data:dashboard_(ctx,false).data };
+    case 'me': return { ok: true, user:userSummary_(auth) };
     case 'logout': return logout_(payload.token, ctx);
     case 'dashboard': return dashboard_(ctx, false);
     case 'listPatients': return listRecords_('PATIENTS', payload, ctx);
     case 'getPatient': return getRecord_('PATIENTS', payload.id, ctx);
-    case 'savePatient': return saveRecord_('PATIENTS', 'PatientID', 'PT', payload.data, ctx);
+    case 'savePatient': requireRole_(ctx, ['admin','manager','cm']); return saveRecord_('PATIENTS', 'PatientID', 'PT', payload.data, ctx);
     case 'deletePatient': return archiveRecord_('PATIENTS', 'PatientID', payload.id, ctx);
     case 'listVisits': return listRecords_('VISITS', payload, ctx);
     case 'saveVisit': return saveVisit_(payload.data, ctx);
@@ -150,9 +159,9 @@ function route_(action, payload, event) {
     case 'listAssessments': return listRecords_('ASSESSMENTS', payload, ctx);
     case 'saveAssessment': return saveAssessment_(payload.data, ctx);
     case 'listCarePlans': return listRecords_('CARE_PLANS', payload, ctx);
-    case 'saveCarePlan': return saveRecord_('CARE_PLANS', 'CarePlanID', 'CP', payload.data, ctx);
+    case 'saveCarePlan': requireRole_(ctx, ['admin','manager','cm']); return saveRecord_('CARE_PLANS', 'CarePlanID', 'CP', payload.data, ctx);
     case 'listAlerts': return listRecords_('ALERTS', payload, ctx);
-    case 'saveAlert': return saveRecord_('ALERTS', 'AlertID', 'AL', payload.data, ctx);
+    case 'saveAlert': return savePatientLinkedRecord_('ALERTS', 'AlertID', 'AL', payload.data, ctx);
     case 'listStaff': return listStaff_(payload, ctx);
     case 'saveStaff': requireRole_(ctx, ['admin','manager','cm']); return saveRecord_('STAFF', 'StaffID', 'ST', payload.data, ctx);
     case 'getContractMaster': requireRole_(ctx, ['admin','manager','cm']); return getContractMaster_(ctx);
@@ -191,7 +200,7 @@ function login_(username, password, event) {
   cacheAuth_(token, user, expires);
   CacheService.getScriptCache().put(touchCacheKey_(token),'1',PERFORMANCE.SESSION_TOUCH_TTL);
   audit_({username:user.Username, role:user.Role, ip:clientIp_(event)}, 'LOGIN_SUCCESS', 'USERS', user.UserID, 'เข้าสู่ระบบสำเร็จ');
-  return { ok: true, token: token, expiresAt: formatDate_(expires), user: { username:user.Username, displayName:user.DisplayName, role:user.Role } };
+  return { ok: true, token: token, expiresAt: formatDate_(expires), user:userSummary_(user) };
 }
 
 function requireAuth_(token) {
@@ -205,6 +214,45 @@ function requireAuth_(token) {
   cacheAuth_(token, user, session.ExpiresAt);
   CacheService.getScriptCache().put(touchCacheKey_(token),'1',PERFORMANCE.SESSION_TOUCH_TTL);
   return user;
+}
+
+function userSummary_(user) {
+  return {
+    username:user.Username,
+    displayName:user.DisplayName || user.Username,
+    role:user.Role,
+    mustChangePassword:isTruthy_(user.MustChangePassword)
+  };
+}
+
+function isTruthy_(value) {
+  if (value === true || value === 1) return true;
+  return ['true','1','yes','y','required','ต้องเปลี่ยน'].includes(String(value || '').trim().toLowerCase());
+}
+
+function isCg_(ctx) {
+  return !!ctx && String(ctx.role || '').trim().toLowerCase() === 'cg';
+}
+
+function normalizeAssignee_(value) {
+  return String(value || '').trim().toLowerCase().replace(/\s+/g,' ');
+}
+
+function isPatientAssignedTo_(patient, ctx) {
+  if (!isCg_(ctx)) return true;
+  const assigned = normalizeAssignee_(patient && patient.CG);
+  if (!assigned) return false;
+  const identities = [ctx.username,ctx.displayName].map(normalizeAssignee_).filter(Boolean);
+  return identities.some(identity => assigned === identity || assigned.includes(identity));
+}
+
+function assignedPatientIds_(ctx) {
+  return new Set(rowsAsObjects_('PATIENTS').filter(patient => isPatientAssignedTo_(patient,ctx)).map(patient => String(patient.PatientID)));
+}
+
+function assertPatientAccess_(patientId, ctx) {
+  if (!isCg_(ctx)) return;
+  if (!patientId || !assignedPatientIds_(ctx).has(String(patientId))) throw new Error('คุณไม่มีสิทธิ์เข้าถึงผู้ป่วยรายนี้');
 }
 
 function requireRole_(ctx, roles) {
@@ -221,13 +269,18 @@ function logout_(token, ctx) {
 function dashboard_(ctx, isPublic) {
   const cache = CacheService.getScriptCache();
   const cacheKey = dashboardCacheKey_(isPublic);
-  try {
-    const cached = cache.get(cacheKey);
-    if (cached) return {ok:true,data:JSON.parse(cached),public:isPublic,cached:true};
-  } catch (e) {}
-  const patients = rowsAsObjects_('PATIENTS').filter(p => String(p.Status).toLowerCase() !== 'archived');
-  const visits = rowsAsObjects_('VISITS');
-  const alerts = rowsAsObjects_('ALERTS');
+  const scopedForCg = isCg_(ctx);
+  if (!scopedForCg) {
+    try {
+      const cached = cache.get(cacheKey);
+      if (cached) return {ok:true,data:JSON.parse(cached),public:isPublic,cached:true};
+    } catch (e) {}
+  }
+  let patients = rowsAsObjects_('PATIENTS').filter(p => String(p.Status).toLowerCase() !== 'archived');
+  if (scopedForCg) patients = patients.filter(patient => isPatientAssignedTo_(patient,ctx));
+  const patientIds = new Set(patients.map(patient => String(patient.PatientID)));
+  const visits = rowsAsObjects_('VISITS').filter(row => !scopedForCg || patientIds.has(String(row.PatientID)));
+  const alerts = rowsAsObjects_('ALERTS').filter(row => !scopedForCg || patientIds.has(String(row.PatientID)));
   const today = Utilities.formatDate(new Date(), APP.TZ, 'yyyy-MM-dd');
   const levels = countBy_(patients, 'DependencyLevel');
   const risks = countBy_(patients, 'RiskLevel');
@@ -242,7 +295,7 @@ function dashboard_(ctx, isPublic) {
     risk: risks,
     updatedAt: now_()
   };
-  if (!isPublic && ctx) {
+  if (!isPublic && ctx && !scopedForCg) {
     const equipment = rowsAsObjects_('EQUIPMENT');
     const budgets = rowsAsObjects_('BUDGETS');
     const plannedBudget = budgets.reduce((sum, b) => sum + (Number(b.PlannedAmount) || 0), 0);
@@ -261,12 +314,21 @@ function dashboard_(ctx, isPublic) {
       percentUsed: plannedBudget > 0 ? Math.round(actualBudget / plannedBudget * 1000) / 10 : 0
     };
   }
-  try { cache.put(cacheKey,JSON.stringify(result),PERFORMANCE.DASHBOARD_TTL); } catch (e) {}
+  if (!scopedForCg) {
+    try { cache.put(cacheKey,JSON.stringify(result),PERFORMANCE.DASHBOARD_TTL); } catch (e) {}
+  }
   return { ok:true, data:result, public:isPublic };
 }
 
 function listRecords_(sheetName, payload, ctx) {
   let rows = rowsAsObjects_(sheetName);
+  if (isCg_(ctx)) {
+    if (sheetName === 'PATIENTS') rows = rows.filter(row => isPatientAssignedTo_(row,ctx));
+    else if (APP.SHEETS[sheetName] && APP.SHEETS[sheetName].includes('PatientID')) {
+      const allowed = assignedPatientIds_(ctx);
+      rows = rows.filter(row => allowed.has(String(row.PatientID)));
+    }
+  }
   const idField = APP.SHEETS[sheetName][0];
   if (payload.id) rows = rows.filter(r => String(r[idField]) === String(payload.id));
   const q = String(payload.q || '').trim().toLowerCase();
@@ -313,14 +375,32 @@ function getRecord_(sheetName, id, ctx) {
   const idField = APP.SHEETS[sheetName][0];
   const row = rowsAsObjects_(sheetName).find(r => String(r[idField]) === String(id));
   if (!row) throw new Error('ไม่พบข้อมูล');
+  if (isCg_(ctx)) {
+    if (sheetName === 'PATIENTS' && !isPatientAssignedTo_(row,ctx)) throw new Error('คุณไม่มีสิทธิ์ดูข้อมูลผู้ป่วยรายนี้');
+    if (sheetName !== 'PATIENTS' && Object.prototype.hasOwnProperty.call(row,'PatientID')) assertPatientAccess_(row.PatientID,ctx);
+  }
   audit_(ctx,'READ',sheetName,id,'เปิดดูข้อมูล');
   return {ok:true,data:row};
+}
+
+function savePatientLinkedRecord_(sheetName, idField, prefix, data, ctx) {
+  if (!data || !data.PatientID) throw new Error('กรุณาเลือกผู้ป่วย');
+  assertPatientAccess_(data.PatientID,ctx);
+  return saveRecord_(sheetName,idField,prefix,data,ctx);
 }
 
 function saveRecord_(sheetName, idField, prefix, data, ctx) {
   if (!data || typeof data !== 'object') throw new Error('ข้อมูลไม่ถูกต้อง');
   const now = new Date();
   const clean = sanitizeObject_(data, APP.SHEETS[sheetName]);
+  if (isCg_(ctx) && APP.SHEETS[sheetName].includes('PatientID')) {
+    if (clean[idField]) {
+      const existing = rowsAsObjects_(sheetName).find(row => String(row[idField]) === String(clean[idField]));
+      if (!existing) throw new Error('ไม่พบข้อมูลสำหรับแก้ไข');
+      assertPatientAccess_(existing.PatientID,ctx);
+    }
+    if (clean.PatientID) assertPatientAccess_(clean.PatientID,ctx);
+  }
   if (!clean[idField]) {
     clean[idField] = makeId_(prefix);
     clean.CreatedAt = now;
@@ -339,6 +419,8 @@ function saveRecord_(sheetName, idField, prefix, data, ctx) {
 }
 
 function saveVisit_(data, ctx) {
+  if (!data || !data.PatientID) throw new Error('กรุณาเลือกผู้ป่วย');
+  assertPatientAccess_(data.PatientID,ctx);
   const result = saveRecord_('VISITS','VisitID','VS',data,ctx);
   if (data.PatientID && data.VisitDate) updateById_('PATIENTS','PatientID',data.PatientID,{LastVisit:data.VisitDate,NextVisit:data.NextVisit || '',UpdatedAt:new Date(),UpdatedBy:ctx.username});
   const alerts = detectAlerts_(data, ctx);
@@ -348,6 +430,7 @@ function saveVisit_(data, ctx) {
 
 // รูปหลักฐานเก็บเป็นไฟล์ส่วนตัวใน Google Drive และเปิดอ่านผ่าน API หลังยืนยันตัวตนเท่านั้น
 function uploadVisitPhotos_(photos, patientId, ctx) {
+  assertPatientAccess_(patientId,ctx);
   if (!Array.isArray(photos) || !photos.length) throw new Error('ไม่พบรูปภาพสำหรับอัปโหลด');
   if (photos.length > 4) throw new Error('แนบรูปได้ครั้งละไม่เกิน 4 รูป');
   const folder = getVisitPhotoFolder_();
@@ -372,6 +455,7 @@ function getVisitPhotos_(visitId, ctx) {
   if (!visitId) throw new Error('ไม่พบรหัสการเยี่ยมบ้าน');
   const visit = rowsAsObjects_('VISITS').find(v => String(v.VisitID) === String(visitId));
   if (!visit) throw new Error('ไม่พบข้อมูลการเยี่ยมบ้าน');
+  assertPatientAccess_(visit.PatientID,ctx);
   const refs = parseVisitPhotoRefs_(visit.PhotoURL);
   const data = refs.slice(0,8).map(ref => {
     try {
@@ -460,6 +544,8 @@ function getContractPrintData_(id, ctx) {
 
 function saveAssessment_(data, ctx) {
   if (!data || typeof data !== 'object') throw new Error('ข้อมูลแบบประเมินไม่ถูกต้อง');
+  if (!data.PatientID) throw new Error('กรุณาเลือกผู้ป่วย');
+  assertPatientAccess_(data.PatientID,ctx);
   const isNew = !data.AssessmentID;
   const previous = isNew ? null : rowsAsObjects_('ASSESSMENTS').find(r => String(r.AssessmentID) === String(data.AssessmentID));
   const calculated = calculateAssessment_(data.AssessmentType, data.AssessmentData);
@@ -593,7 +679,7 @@ function archiveRecord_(sheetName, idField, id, ctx) {
 }
 
 function listUsers_(ctx) {
-  const rows = rowsAsObjects_('USERS').map(u => ({UserID:u.UserID,Username:u.Username,DisplayName:u.DisplayName,Role:u.Role,Status:u.Status,LastLogin:u.LastLogin,CreatedAt:u.CreatedAt}));
+  const rows = rowsAsObjects_('USERS').map(u => ({UserID:u.UserID,Username:u.Username,DisplayName:u.DisplayName,Role:u.Role,Status:u.Status,MustChangePassword:isTruthy_(u.MustChangePassword),LastLogin:u.LastLogin,CreatedAt:u.CreatedAt}));
   audit_(ctx,'READ_LIST','USERS','','อ่านรายชื่อผู้ใช้');
   return {ok:true,data:rows};
 }
@@ -605,14 +691,14 @@ function saveUser_(data, ctx) {
   const now = new Date();
   if (data.UserID) {
     const patch = {Username:String(data.Username).toLowerCase(),DisplayName:data.DisplayName,Role:data.Role,Status:data.Status || 'active',UpdatedAt:now};
-    if (data.Password) { patch.Salt = makeSalt_(); patch.PasswordHash = hashPassword_(data.Password, patch.Salt); }
+    if (data.Password) { patch.Salt = makeSalt_(); patch.PasswordHash = hashPassword_(data.Password, patch.Salt); patch.MustChangePassword = true; }
     updateById_('USERS','UserID',data.UserID,patch);
     audit_(ctx,'UPDATE','USERS',data.UserID,'แก้ไขผู้ใช้');
     return {ok:true,id:data.UserID};
   }
   if (!data.Password) throw new Error('กรุณาระบุรหัสผ่าน');
   const salt = makeSalt_();
-  const row = {UserID:makeId_('US'),Username:String(data.Username).toLowerCase(),PasswordHash:hashPassword_(data.Password,salt),Salt:salt,DisplayName:data.DisplayName||data.Username,Role:data.Role||'cg',Status:data.Status||'active',CreatedAt:now,UpdatedAt:now};
+  const row = {UserID:makeId_('US'),Username:String(data.Username).toLowerCase(),PasswordHash:hashPassword_(data.Password,salt),Salt:salt,DisplayName:data.DisplayName||data.Username,Role:data.Role||'cg',Status:data.Status||'active',CreatedAt:now,UpdatedAt:now,MustChangePassword:true};
   appendObject_('USERS',row); audit_(ctx,'CREATE','USERS',row.UserID,'สร้างผู้ใช้');
   return {ok:true,id:row.UserID};
 }
@@ -622,16 +708,17 @@ function changePassword_(payload, ctx) {
   if (!user || hashPassword_(String(payload.currentPassword||''),String(user.Salt)) !== String(user.PasswordHash)) throw new Error('รหัสผ่านปัจจุบันไม่ถูกต้อง');
   if (String(payload.newPassword||'').length < 4) throw new Error('รหัสผ่านใหม่ต้องมีอย่างน้อย 4 ตัวอักษร');
   const salt = makeSalt_();
-  updateById_('USERS','UserID',ctx.userId,{Salt:salt,PasswordHash:hashPassword_(payload.newPassword,salt),UpdatedAt:new Date()});
+  updateById_('USERS','UserID',ctx.userId,{Salt:salt,PasswordHash:hashPassword_(payload.newPassword,salt),MustChangePassword:false,UpdatedAt:new Date()});
+  CacheService.getScriptCache().remove(authCacheKey_(ctx.token));
   audit_(ctx,'CHANGE_PASSWORD','USERS',ctx.userId,'เปลี่ยนรหัสผ่าน');
-  return {ok:true,message:'เปลี่ยนรหัสผ่านเรียบร้อยแล้ว'};
+  return {ok:true,message:'เปลี่ยนรหัสผ่านเรียบร้อยแล้ว',mustChangePassword:false};
 }
 
 function resetAdminPassword() {
   setupSystem();
   const admin = rowsAsObjects_('USERS').find(u => String(u.Username).toLowerCase() === 'admin');
   const salt = makeSalt_();
-  updateById_('USERS','UserID',admin.UserID,{Salt:salt,PasswordHash:hashPassword_(APP.DEFAULT_PASSWORD,salt),Status:'active',UpdatedAt:new Date()});
+  updateById_('USERS','UserID',admin.UserID,{Salt:salt,PasswordHash:hashPassword_(APP.DEFAULT_PASSWORD,salt),Status:'active',MustChangePassword:true,UpdatedAt:new Date()});
   SpreadsheetApp.getUi().alert('รีเซ็ตรหัสผ่าน admin เป็น 1234 แล้ว กรุณาเปลี่ยนทันทีหลังเข้าสู่ระบบ');
 }
 
@@ -654,6 +741,21 @@ function seedAdmin_() {
   if (rowsAsObjects_('USERS').some(u => String(u.Username).toLowerCase() === APP.DEFAULT_ADMIN)) return;
   const salt = makeSalt_();
   appendObject_('USERS',{UserID:makeId_('US'),Username:APP.DEFAULT_ADMIN,PasswordHash:hashPassword_(APP.DEFAULT_PASSWORD,salt),Salt:salt,DisplayName:'ผู้ดูแลระบบ',Role:'admin',Status:'active',CreatedAt:new Date(),UpdatedAt:new Date()});
+}
+
+function seedCgUsers_() {
+  const existing = rowsAsObjects_('USERS');
+  const usernames = new Set(existing.map(user => String(user.Username || '').trim().toLowerCase()));
+  DEFAULT_CG_USERS.forEach(displayName => {
+    const username = String(displayName).trim().toLowerCase();
+    if (usernames.has(username)) return;
+    const salt = makeSalt_();
+    appendObject_('USERS',{
+      UserID:makeId_('US'),Username:username,PasswordHash:hashPassword_(APP.DEFAULT_PASSWORD,salt),Salt:salt,
+      DisplayName:displayName,Role:'cg',Status:'active',CreatedAt:new Date(),UpdatedAt:new Date(),MustChangePassword:true
+    });
+    usernames.add(username);
+  });
 }
 
 function seedCodebook_() {
