@@ -82,10 +82,12 @@ function onOpen() {
 function setupSystem() {
   clearAllDataCaches_();
   const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const usersBeforeSetup = ss.getSheetByName('USERS');
+  const hadMustChangePassword = usersBeforeSetup && usersBeforeSetup.getLastColumn() && usersBeforeSetup.getRange(1,1,1,usersBeforeSetup.getLastColumn()).getValues()[0].includes('MustChangePassword');
   Object.keys(APP.SHEETS).forEach(name => ensureSheet_(ss, name, APP.SHEETS[name]));
   seedSettings_();
   seedAdmin_();
-  seedCgUsers_();
+  seedCgUsers_(!hadMustChangePassword);
   seedCodebook_();
   SpreadsheetApp.flush();
   clearAllDataCaches_();
@@ -743,18 +745,25 @@ function seedAdmin_() {
   appendObject_('USERS',{UserID:makeId_('US'),Username:APP.DEFAULT_ADMIN,PasswordHash:hashPassword_(APP.DEFAULT_PASSWORD,salt),Salt:salt,DisplayName:'ผู้ดูแลระบบ',Role:'admin',Status:'active',CreatedAt:new Date(),UpdatedAt:new Date()});
 }
 
-function seedCgUsers_() {
+function seedCgUsers_(markExistingForFirstLogin) {
   const existing = rowsAsObjects_('USERS');
-  const usernames = new Set(existing.map(user => String(user.Username || '').trim().toLowerCase()));
+  const usersByUsername = existing.reduce((map,user) => {
+    map[String(user.Username || '').trim().toLowerCase()] = user;
+    return map;
+  },{});
   DEFAULT_CG_USERS.forEach(displayName => {
     const username = String(displayName).trim().toLowerCase();
-    if (usernames.has(username)) return;
+    const current = usersByUsername[username];
+    if (current) {
+      if (markExistingForFirstLogin && !isTruthy_(current.MustChangePassword)) updateById_('USERS','UserID',current.UserID,{MustChangePassword:true,UpdatedAt:new Date()});
+      return;
+    }
     const salt = makeSalt_();
     appendObject_('USERS',{
       UserID:makeId_('US'),Username:username,PasswordHash:hashPassword_(APP.DEFAULT_PASSWORD,salt),Salt:salt,
       DisplayName:displayName,Role:'cg',Status:'active',CreatedAt:new Date(),UpdatedAt:new Date(),MustChangePassword:true
     });
-    usernames.add(username);
+    usersByUsername[username] = {Username:username};
   });
 }
 
