@@ -6,7 +6,7 @@
  */
 
 const APP = {
-  VERSION: '1.8.0',
+  VERSION: '1.9.0',
   TZ: 'Asia/Bangkok',
   SESSION_HOURS: 8,
   DEFAULT_ADMIN: 'admin',
@@ -20,7 +20,7 @@ const APP = {
     CARE_PLANS: ['CarePlanID','PatientID','Version','PlanDate','StartDate','EndDate','Problems','Goals','Activities','Frequency','Responsible','Indicators','BudgetPlan','Status','ApprovedBy','ApprovedAt','ReviewDate','Notes','CreatedAt','CreatedBy','UpdatedAt','UpdatedBy'],
     VISITS: ['VisitID','PatientID','ScheduleDate','VisitDate','StartTime','EndTime','Visitor','VisitType','Status','Temperature','Pulse','Respiration','Systolic','Diastolic','SpO2','DTX','Weight','PainScore','Activities','Problems','Actions','Advice','Referral','NextVisit','Latitude','Longitude','PhotoURL','CMReview','Reviewer','ReviewedAt','Notes','CreatedAt','CreatedBy','UpdatedAt','UpdatedBy'],
     ALERTS: ['AlertID','PatientID','AlertDate','Level','Category','Message','Status','AssignedTo','AcknowledgedAt','Response','ClosedAt','CreatedBy','CreatedAt'],
-    STAFF: ['StaffID','UserID','Prefix','FirstName','LastName','Role','CitizenID','BirthDate','Age','Phone','Address','HouseNo','Moo','Village','Subdistrict','District','Province','BankName','BankBranch','BankAccountName','BankAccountNo','TrainingDate','CertificateExpiry','Status','PatientCount','Notes','CreatedAt','CreatedBy','UpdatedAt','UpdatedBy'],
+    STAFF: ['StaffID','UserID','Prefix','FirstName','LastName','Role','BirthDate','Age','Phone','Address','HouseNo','Moo','Village','Subdistrict','District','Province','BankName','BankAccountName','TrainingDate','CertificateExpiry','Status','PatientCount','Notes','CreatedAt','CreatedBy','UpdatedAt','UpdatedBy'],
     EQUIPMENT: ['EquipmentID','EquipmentType','AssetNo','SerialNo','Status','PatientID','LoanDate','DueDate','ReturnDate','Condition','MaintenanceDue','Notes','CreatedAt','UpdatedAt'],
     BUDGETS: ['BudgetID','FiscalYear','Source','PatientID','CarePlanID','Category','Description','PlannedAmount','ActualAmount','DocumentNo','ExpenseDate','Status','Requester','Approver','ApprovedAt','Notes','CreatedAt','UpdatedAt'],
     CONTRACTS: ['ContractID','ContractNo','StaffID','ContractDate','StartDate','EndDate','DurationMonths','MonthlyAmount','TotalAmount','PaymentEveryMonths','DailyDeduction','Status','ScopeOverride','Notes','CreatedAt','CreatedBy','UpdatedAt','UpdatedBy'],
@@ -85,6 +85,7 @@ function setupSystem() {
   const usersBeforeSetup = ss.getSheetByName('USERS');
   const hadMustChangePassword = usersBeforeSetup && usersBeforeSetup.getLastColumn() && usersBeforeSetup.getRange(1,1,1,usersBeforeSetup.getLastColumn()).getValues()[0].includes('MustChangePassword');
   Object.keys(APP.SHEETS).forEach(name => ensureSheet_(ss, name, APP.SHEETS[name]));
+  clearSensitiveStaffData_();
   seedSettings_();
   seedAdmin_();
   seedCgUsers_(!hadMustChangePassword);
@@ -107,10 +108,10 @@ function ensureSystemReady_() {
   const missingCore = !patients || !ss.getSheetByName('USERS') || !ss.getSheetByName('SESSIONS');
   const missingPatientGroup = patients && !patients.getRange(1,1,1,Math.max(patients.getLastColumn(),1)).getValues()[0].includes('PatientGroup');
   const missingAssessmentData = assessments && !assessments.getRange(1,1,1,Math.max(assessments.getLastColumn(),1)).getValues()[0].includes('AssessmentData');
-  const missingStaffCitizenId = staff && !staff.getRange(1,1,1,Math.max(staff.getLastColumn(),1)).getValues()[0].includes('CitizenID');
   const missingStaffUserId = staff && !staff.getRange(1,1,1,Math.max(staff.getLastColumn(),1)).getValues()[0].includes('UserID');
   const missingMustChangePassword = users && !users.getRange(1,1,1,Math.max(users.getLastColumn(),1)).getValues()[0].includes('MustChangePassword');
-  if (missingCore || !assessments || !staff || !ss.getSheetByName('CONTRACTS') || missingPatientGroup || missingAssessmentData || missingStaffCitizenId || missingStaffUserId || missingMustChangePassword) setupSystem();
+  if (missingCore || !assessments || !staff || !ss.getSheetByName('CONTRACTS') || missingPatientGroup || missingAssessmentData || missingStaffUserId || missingMustChangePassword) setupSystem();
+  else clearSensitiveStaffData_();
   cache.put(readyCacheKey_(), '1', PERFORMANCE.READY_TTL);
 }
 
@@ -355,12 +356,37 @@ function listRecords_(sheetName, payload, ctx) {
   return {ok:true,data:rows,total:total,limit:limit,offset:offset};
 }
 
-// CG ต้องใช้รายชื่อบุคลากรสำหรับเลือกผู้เยี่ยม แต่ไม่ควรได้รับเลขบัตร ที่อยู่ หรือข้อมูลธนาคารของบุคลากรอื่น
+function clearSensitiveStaffData_() {
+  const props = PropertiesService.getScriptProperties();
+  const migrationKey = 'LTC_STAFF_SENSITIVE_FIELDS_REMOVED_V1';
+  if (props.getProperty(migrationKey) === '1') return;
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('STAFF');
+  if (!sheet || sheet.getLastColumn() < 1) return;
+  const headers = sheet.getRange(1,1,1,sheet.getLastColumn()).getValues()[0].map(String);
+  const rows = Math.max(sheet.getLastRow()-1,0);
+  if (rows) ['CitizenID','BankBranch','BankAccountNo'].forEach(field => {
+    const col = headers.indexOf(field);
+    if (col >= 0) sheet.getRange(2,col+1,rows,1).clearContent();
+  });
+  clearDataCache_('STAFF');
+  props.setProperty(migrationKey,'1');
+}
+
+function safeStaffRecord_(row) {
+  const safe = Object.assign({},row);
+  delete safe.CitizenID;
+  delete safe.BankBranch;
+  delete safe.BankAccountNo;
+  return safe;
+}
+
+// CG ต้องใช้รายชื่อบุคลากรสำหรับเลือกผู้เยี่ยม แต่ไม่ควรได้รับที่อยู่หรือข้อมูลธนาคารของบุคลากรอื่น
 function listStaff_(payload, ctx) {
   const privileged = ['admin','manager','cm'].includes(String(ctx.role || '').toLowerCase());
-  if (privileged) return listRecords_('STAFF', payload, ctx);
-  const allowed = ['StaffID','Prefix','FirstName','LastName','Role','Phone','Village','TrainingDate','CertificateExpiry','Status','PatientCount'];
-  let rows = rowsAsObjects_('STAFF').map(row => allowed.reduce((safe, key) => { safe[key] = row[key]; return safe; }, {}));
+  const allowed = privileged
+    ? APP.SHEETS.STAFF.slice()
+    : ['StaffID','Prefix','FirstName','LastName','Role','Phone','Village','TrainingDate','CertificateExpiry','Status','PatientCount'];
+  let rows = rowsAsObjects_('STAFF').map(safeStaffRecord_).map(row => allowed.reduce((safe, key) => { safe[key] = row[key]; return safe; }, {}));
   if (payload.id) rows = rows.filter(row => String(row.StaffID) === String(payload.id));
   const q = String(payload.q || '').trim().toLowerCase();
   if (q) rows = rows.filter(row => Object.values(row).some(value => String(value || '').toLowerCase().includes(q)));
@@ -413,13 +439,13 @@ function ensureMyStaffProfile_(ctx) {
 function getMyStaffProfile_(ctx) {
   const profile = ensureMyStaffProfile_(ctx);
   audit_(ctx,'READ_SELF_PROFILE','STAFF',profile.StaffID,'เปิดดูข้อมูลบุคลากรของตนเอง');
-  return {ok:true,data:profile};
+  return {ok:true,data:safeStaffRecord_(profile)};
 }
 
 function saveMyStaffProfile_(data, ctx) {
   if (!data || typeof data !== 'object') throw new Error('ข้อมูลส่วนตัวไม่ถูกต้อง');
   const profile = ensureMyStaffProfile_(ctx);
-  const allowed = ['Prefix','FirstName','LastName','CitizenID','BirthDate','Age','Phone','Address','HouseNo','Moo','Village','Subdistrict','District','Province','BankName','BankBranch','BankAccountName','BankAccountNo','TrainingDate','CertificateExpiry','Notes'];
+  const allowed = ['Prefix','FirstName','LastName','BirthDate','Age','Phone','Address','HouseNo','Moo','Village','Subdistrict','District','Province','BankName','BankAccountName','TrainingDate','CertificateExpiry','Notes'];
   const clean = sanitizeObject_(data,allowed);
   const firstName = String(clean.FirstName !== undefined ? clean.FirstName : profile.FirstName || '').trim();
   const lastName = String(clean.LastName !== undefined ? clean.LastName : profile.LastName || '').trim();
@@ -429,7 +455,7 @@ function saveMyStaffProfile_(data, ctx) {
   if (!updateById_('STAFF','StaffID',profile.StaffID,clean)) throw new Error('ไม่พบข้อมูลบุคลากรของคุณ');
   audit_(ctx,'UPDATE_SELF_PROFILE','STAFF',profile.StaffID,'แก้ไขข้อมูลบุคลากรของตนเอง');
   const updated = rowsAsObjects_('STAFF').find(row => String(row.StaffID) === String(profile.StaffID));
-  return {ok:true,id:profile.StaffID,data:updated || Object.assign({},profile,clean)};
+  return {ok:true,id:profile.StaffID,data:safeStaffRecord_(updated || Object.assign({},profile,clean))};
 }
 
 function getRecord_(sheetName, id, ctx) {
@@ -600,7 +626,7 @@ function getContractPrintData_(id, ctx) {
   if (!staff) throw new Error('ไม่พบข้อมูล CG ของข้อตกลงนี้');
   const master = getContractMaster_(ctx).data;
   audit_(ctx,'PRINT','CONTRACTS',id,'เตรียมพิมพ์บันทึกข้อตกลงจ้างรายบุคคล');
-  return {ok:true,data:{contract:contract,staff:staff,master:master}};
+  return {ok:true,data:{contract:contract,staff:safeStaffRecord_(staff),master:master}};
 }
 
 function saveAssessment_(data, ctx) {
