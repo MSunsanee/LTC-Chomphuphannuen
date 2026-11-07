@@ -6,7 +6,7 @@
  */
 
 const APP = {
-  VERSION: '1.12.0',
+  VERSION: '1.13.0',
   TZ: 'Asia/Bangkok',
   SESSION_HOURS: 8,
   DEFAULT_ADMIN: 'admin',
@@ -242,7 +242,17 @@ function isCg_(ctx) {
 }
 
 function normalizeAssignee_(value) {
-  return String(value || '').trim().toLowerCase().replace(/\s+/g,' ');
+  let normalized = String(value || '');
+  if (typeof normalized.normalize === 'function') normalized = normalized.normalize('NFKC');
+  return normalized
+    .toLowerCase()
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g,'')
+    .replace(/\s+/g,' ')
+    .trim()
+    // ชื่อผู้รับผิดชอบอาจบันทึกเป็นชื่อสั้น ชื่อเต็ม หรือมีคำนำหน้าอยู่ในช่องชื่อ
+    .replace(/^(?:(?:นางสาว|นาง|นาย|น\.?\s*ส\.?|นส\.?|ด\.?\s*ช\.?|ดช\.?|ด\.?\s*ญ\.?|ดญ\.?|เด็กชาย|เด็กหญิง|คุณ)\s*)+/,'')
+    .replace(/\s+/g,' ')
+    .trim();
 }
 
 function isPatientAssignedTo_(patient, ctx) {
