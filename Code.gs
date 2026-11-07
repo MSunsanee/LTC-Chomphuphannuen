@@ -6,7 +6,7 @@
  */
 
 const APP = {
-  VERSION: '1.10.0',
+  VERSION: '1.11.0',
   TZ: 'Asia/Bangkok',
   SESSION_HOURS: 8,
   DEFAULT_ADMIN: 'admin',
@@ -341,6 +341,11 @@ function listRecords_(sheetName, payload, ctx) {
   const q = String(payload.q || '').trim().toLowerCase();
   if (q) rows = rows.filter(r => Object.values(r).some(v => String(v || '').toLowerCase().includes(q)));
   if (payload.patientId) rows = rows.filter(r => String(r.PatientID) === String(payload.patientId));
+  if (sheetName === 'VISITS' && payload.month) {
+    const month = String(payload.month).trim();
+    if (!/^\d{4}-\d{2}$/.test(month)) throw new Error('รูปแบบเดือนไม่ถูกต้อง');
+    rows = rows.filter(r => dateOnly_(r.VisitDate || r.ScheduleDate).substring(0,7) === month);
+  }
   if (payload.status) rows = rows.filter(r => String(r.Status).toLowerCase() === String(payload.status).toLowerCase());
   const total = rows.length;
   const limit = Math.min(Math.max(Number(payload.limit || 200), 1), 1000);
