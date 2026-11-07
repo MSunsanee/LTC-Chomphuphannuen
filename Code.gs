@@ -6,7 +6,7 @@
  */
 
 const APP = {
-  VERSION: '1.9.0',
+  VERSION: '1.10.0',
   TZ: 'Asia/Bangkok',
   SESSION_HOURS: 8,
   DEFAULT_ADMIN: 'admin',
@@ -417,6 +417,16 @@ function findMyStaffProfile_(ctx) {
   }) || null;
 }
 
+function visitorNameForCtx_(ctx) {
+  if (!isCg_(ctx)) return '';
+  const profile = findMyStaffProfile_(ctx);
+  if (profile) {
+    const fullName = (String(profile.Prefix || '')+String(profile.FirstName || '')+' '+String(profile.LastName || '')).trim();
+    if (fullName) return fullName;
+  }
+  return String(ctx.displayName || ctx.username || '').trim();
+}
+
 function ensureMyStaffProfile_(ctx) {
   let profile = findMyStaffProfile_(ctx);
   if (profile) {
@@ -507,10 +517,13 @@ function saveRecord_(sheetName, idField, prefix, data, ctx) {
 
 function saveVisit_(data, ctx) {
   if (!data || !data.PatientID) throw new Error('กรุณาเลือกผู้ป่วย');
-  assertPatientAccess_(data.PatientID,ctx);
-  const result = saveRecord_('VISITS','VisitID','VS',data,ctx);
-  if (data.PatientID && data.VisitDate) updateById_('PATIENTS','PatientID',data.PatientID,{LastVisit:data.VisitDate,NextVisit:data.NextVisit || '',UpdatedAt:new Date(),UpdatedBy:ctx.username});
-  const alerts = detectAlerts_(data, ctx);
+  const visitData = Object.assign({},data);
+  if (isCg_(ctx)) visitData.Visitor = visitorNameForCtx_(ctx);
+  if (!String(visitData.Visitor || '').trim()) throw new Error('ไม่พบชื่อผู้เยี่ยม');
+  assertPatientAccess_(visitData.PatientID,ctx);
+  const result = saveRecord_('VISITS','VisitID','VS',visitData,ctx);
+  if (visitData.PatientID && visitData.VisitDate) updateById_('PATIENTS','PatientID',visitData.PatientID,{LastVisit:visitData.VisitDate,NextVisit:visitData.NextVisit || '',UpdatedAt:new Date(),UpdatedBy:ctx.username});
+  const alerts = detectAlerts_(visitData, ctx);
   result.alerts = alerts;
   return result;
 }
