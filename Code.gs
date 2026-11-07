@@ -6,7 +6,7 @@
  */
 
 const APP = {
-  VERSION: '1.7.0',
+  VERSION: '1.8.0',
   TZ: 'Asia/Bangkok',
   SESSION_HOURS: 8,
   DEFAULT_ADMIN: 'admin',
@@ -180,6 +180,7 @@ function route_(action, payload, event) {
     case 'saveBudget': requireRole_(ctx, ['admin','manager','cm']); return saveRecord_('BUDGETS', 'BudgetID', 'BG', payload.data, ctx);
     case 'listUsers': requireRole_(ctx, ['admin']); return listUsers_(ctx);
     case 'saveUser': requireRole_(ctx, ['admin']); return saveUser_(payload.data, ctx);
+    case 'adminResetUserPassword': requireRole_(ctx, ['admin']); return adminResetUserPassword_(payload.data, ctx);
     case 'changePassword': return changePassword_(payload, ctx);
     case 'getSettings': requireRole_(ctx, ['admin']); return { ok: true, data: rowsAsObjects_('SETTINGS') };
     case 'saveSettings': requireRole_(ctx, ['admin']); return saveSettings_(payload.data, ctx);
@@ -761,6 +762,49 @@ function saveUser_(data, ctx) {
   const row = {UserID:makeId_('US'),Username:String(data.Username).toLowerCase(),PasswordHash:hashPassword_(data.Password,salt),Salt:salt,DisplayName:data.DisplayName||data.Username,Role:data.Role||'cg',Status:data.Status||'active',CreatedAt:now,UpdatedAt:now,MustChangePassword:true};
   appendObject_('USERS',row); audit_(ctx,'CREATE','USERS',row.UserID,'สร้างผู้ใช้');
   return {ok:true,id:row.UserID};
+}
+
+function closeSessionsForUser_(userId) {
+  const sheet = getSheet_('SESSIONS');
+  const lastRow = sheet.getLastRow(), lastCol = sheet.getLastColumn();
+  if (lastRow < 2 || lastCol < 1) return 0;
+  const values = sheet.getRange(1,1,lastRow,lastCol).getValues(), headers = values[0];
+  const tokenCol = headers.indexOf('Token'), userCol = headers.indexOf('UserID'), statusCol = headers.indexOf('Status'), lastSeenCol = headers.indexOf('LastSeen');
+  if (tokenCol < 0 || userCol < 0 || statusCol < 0) return 0;
+  const tokens = [];
+  let closed = 0;
+  for (let r=1;r<values.length;r++) {
+    if (String(values[r][userCol]) !== String(userId)) continue;
+    if (values[r][tokenCol]) tokens.push(authCacheKey_(String(values[r][tokenCol])));
+    if (String(values[r][statusCol]).toLowerCase() === 'active') {
+      values[r][statusCol] = 'closed';
+      if (lastSeenCol >= 0) values[r][lastSeenCol] = new Date();
+      closed++;
+    }
+  }
+  if (closed) sheet.getRange(2,1,values.length-1,lastCol).setValues(values.slice(1));
+  if (tokens.length) CacheService.getScriptCache().removeAll(tokens);
+  return closed;
+}
+
+function adminResetUserPassword_(data, ctx) {
+  if (!data || !data.userId) throw new Error('กรุณาเลือกบัญชีผู้ใช้');
+  const password = String(data.newPassword || '');
+  if (password.length < 4) throw new Error('รหัสผ่านใหม่ต้องมีอย่างน้อย 4 ตัวอักษร');
+  const user = rowsAsObjects_('USERS').find(item => String(item.UserID) === String(data.userId));
+  if (!user) throw new Error('ไม่พบบัญชีผู้ใช้');
+  const salt = makeSalt_();
+  if (!updateById_('USERS','UserID',user.UserID,{Salt:salt,PasswordHash:hashPassword_(password,salt),MustChangePassword:true,UpdatedAt:new Date()})) throw new Error('ไม่สามารถตั้งรหัสผ่านใหม่ได้');
+  const sessionsClosed = closeSessionsForUser_(user.UserID);
+  audit_(ctx,'ADMIN_RESET_PASSWORD','USERS',user.UserID,'ผู้ดูแลระบบตั้งรหัสผ่านใหม่ให้ '+user.Username);
+  return {
+    ok:true,
+    message:'ตั้งรหัสผ่านใหม่ให้ '+(user.DisplayName || user.Username)+' เรียบร้อยแล้ว',
+    userId:user.UserID,
+    currentUser:String(user.UserID) === String(ctx.userId),
+    sessionsClosed:sessionsClosed,
+    mustChangePassword:true
+  };
 }
 
 function changePassword_(payload, ctx) {
