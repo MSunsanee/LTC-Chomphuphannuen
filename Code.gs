@@ -6,7 +6,7 @@
  */
 
 const APP = {
-  VERSION: '1.11.0',
+  VERSION: '1.12.0',
   TZ: 'Asia/Bangkok',
   SESSION_HOURS: 8,
   DEFAULT_ADMIN: 'admin',
@@ -273,6 +273,61 @@ function logout_(token, ctx) {
   return {ok:true};
 }
 
+function isCurrentCarePatient_(patient) {
+  return !['archived','เสียชีวิต','deceased','ย้ายพื้นที่','ส่งต่อ','referred'].includes(String(patient && patient.Status || '').trim().toLowerCase());
+}
+
+function cgWorkload_(patients, ctx) {
+  const currentPatients = (patients || []).filter(isCurrentCarePatient_);
+  if (isCg_(ctx)) {
+    return {
+      items:[{name:visitorNameForCtx_(ctx) || ctx.displayName || ctx.username,count:currentPatients.length}],
+      assigned:currentPatients.length,
+      unassigned:0
+    };
+  }
+
+  const users = rowsAsObjects_('USERS').filter(user => String(user.Role || '').trim().toLowerCase() === 'cg' && String(user.Status || 'active').trim().toLowerCase() === 'active');
+  const usersById = users.reduce((map,user) => { map[String(user.UserID || '')] = user; return map; },{});
+  const entries = [];
+  const addEntry = (name, aliases) => {
+    const displayName = String(name || '').trim();
+    const normalized = [...new Set((aliases || []).concat([displayName]).map(normalizeAssignee_).filter(Boolean))];
+    if (!displayName || !normalized.length) return null;
+    const existing = entries.find(entry => entry.aliases.some(alias => normalized.includes(alias)));
+    if (existing) {
+      normalized.forEach(alias => { if (!existing.aliases.includes(alias)) existing.aliases.push(alias); });
+      return existing;
+    }
+    const entry = {name:displayName,count:0,aliases:normalized};
+    entries.push(entry);
+    return entry;
+  };
+
+  rowsAsObjects_('STAFF').filter(staff => String(staff.Role || '').trim().toLowerCase() === 'cg' && !['inactive','archived','ระงับ'].includes(String(staff.Status || '').trim().toLowerCase())).forEach(staff => {
+    const fullName = (String(staff.Prefix || '')+String(staff.FirstName || '')+' '+String(staff.LastName || '')).trim();
+    const user = usersById[String(staff.UserID || '')];
+    addEntry(fullName || (user && (user.DisplayName || user.Username)),[
+      staff.FirstName,
+      (String(staff.FirstName || '')+' '+String(staff.LastName || '')).trim(),
+      user && user.DisplayName,
+      user && user.Username
+    ]);
+  });
+  users.forEach(user => addEntry(user.DisplayName || user.Username,[user.DisplayName,user.Username]));
+
+  let unassigned = 0;
+  currentPatients.forEach(patient => {
+    const assigned = normalizeAssignee_(patient.CG);
+    if (!assigned) { unassigned++; return; }
+    let entry = entries.find(item => item.aliases.some(alias => assigned === alias || assigned.includes(alias) || alias.includes(assigned)));
+    if (!entry) entry = addEntry(String(patient.CG).trim(),[patient.CG]);
+    if (entry) entry.count++;
+  });
+  const items = entries.map(entry => ({name:entry.name,count:entry.count})).sort((a,b) => b.count-a.count || String(a.name).localeCompare(String(b.name),'th'));
+  return {items:items,assigned:items.reduce((sum,item) => sum+item.count,0),unassigned:unassigned};
+}
+
 function dashboard_(ctx, isPublic) {
   const cache = CacheService.getScriptCache();
   const cacheKey = dashboardCacheKey_(isPublic);
@@ -302,6 +357,7 @@ function dashboard_(ctx, isPublic) {
     risk: risks,
     updatedAt: now_()
   };
+  if (!isPublic && ctx) result.cgWorkload = cgWorkload_(patients,ctx);
   if (!isPublic && ctx && !scopedForCg) {
     const equipment = rowsAsObjects_('EQUIPMENT');
     const budgets = rowsAsObjects_('BUDGETS');
@@ -1056,7 +1112,7 @@ function clearDashboardCaches_() {
 }
 function clearDataCache_(name) {
   if (isCacheableSheet_(name)) CacheService.getScriptCache().remove(dataCacheKey_(name));
-  if (['PATIENTS','VISITS','ALERTS','EQUIPMENT','BUDGETS'].includes(name)) clearDashboardCaches_();
+  if (['PATIENTS','VISITS','ALERTS','STAFF','USERS','EQUIPMENT','BUDGETS'].includes(name)) clearDashboardCaches_();
 }
 function clearAllDataCaches_() {
   const cache = CacheService.getScriptCache();
