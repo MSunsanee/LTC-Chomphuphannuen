@@ -6,7 +6,7 @@
  */
 
 const APP = {
-  VERSION: '1.6.0',
+  VERSION: '1.7.0',
   TZ: 'Asia/Bangkok',
   SESSION_HOURS: 8,
   DEFAULT_ADMIN: 'admin',
@@ -20,7 +20,7 @@ const APP = {
     CARE_PLANS: ['CarePlanID','PatientID','Version','PlanDate','StartDate','EndDate','Problems','Goals','Activities','Frequency','Responsible','Indicators','BudgetPlan','Status','ApprovedBy','ApprovedAt','ReviewDate','Notes','CreatedAt','CreatedBy','UpdatedAt','UpdatedBy'],
     VISITS: ['VisitID','PatientID','ScheduleDate','VisitDate','StartTime','EndTime','Visitor','VisitType','Status','Temperature','Pulse','Respiration','Systolic','Diastolic','SpO2','DTX','Weight','PainScore','Activities','Problems','Actions','Advice','Referral','NextVisit','Latitude','Longitude','PhotoURL','CMReview','Reviewer','ReviewedAt','Notes','CreatedAt','CreatedBy','UpdatedAt','UpdatedBy'],
     ALERTS: ['AlertID','PatientID','AlertDate','Level','Category','Message','Status','AssignedTo','AcknowledgedAt','Response','ClosedAt','CreatedBy','CreatedAt'],
-    STAFF: ['StaffID','Prefix','FirstName','LastName','Role','CitizenID','BirthDate','Age','Phone','Address','HouseNo','Moo','Village','Subdistrict','District','Province','BankName','BankBranch','BankAccountName','BankAccountNo','TrainingDate','CertificateExpiry','Status','PatientCount','Notes','CreatedAt','CreatedBy','UpdatedAt','UpdatedBy'],
+    STAFF: ['StaffID','UserID','Prefix','FirstName','LastName','Role','CitizenID','BirthDate','Age','Phone','Address','HouseNo','Moo','Village','Subdistrict','District','Province','BankName','BankBranch','BankAccountName','BankAccountNo','TrainingDate','CertificateExpiry','Status','PatientCount','Notes','CreatedAt','CreatedBy','UpdatedAt','UpdatedBy'],
     EQUIPMENT: ['EquipmentID','EquipmentType','AssetNo','SerialNo','Status','PatientID','LoanDate','DueDate','ReturnDate','Condition','MaintenanceDue','Notes','CreatedAt','UpdatedAt'],
     BUDGETS: ['BudgetID','FiscalYear','Source','PatientID','CarePlanID','Category','Description','PlannedAmount','ActualAmount','DocumentNo','ExpenseDate','Status','Requester','Approver','ApprovedAt','Notes','CreatedAt','UpdatedAt'],
     CONTRACTS: ['ContractID','ContractNo','StaffID','ContractDate','StartDate','EndDate','DurationMonths','MonthlyAmount','TotalAmount','PaymentEveryMonths','DailyDeduction','Status','ScopeOverride','Notes','CreatedAt','CreatedBy','UpdatedAt','UpdatedBy'],
@@ -108,8 +108,9 @@ function ensureSystemReady_() {
   const missingPatientGroup = patients && !patients.getRange(1,1,1,Math.max(patients.getLastColumn(),1)).getValues()[0].includes('PatientGroup');
   const missingAssessmentData = assessments && !assessments.getRange(1,1,1,Math.max(assessments.getLastColumn(),1)).getValues()[0].includes('AssessmentData');
   const missingStaffCitizenId = staff && !staff.getRange(1,1,1,Math.max(staff.getLastColumn(),1)).getValues()[0].includes('CitizenID');
+  const missingStaffUserId = staff && !staff.getRange(1,1,1,Math.max(staff.getLastColumn(),1)).getValues()[0].includes('UserID');
   const missingMustChangePassword = users && !users.getRange(1,1,1,Math.max(users.getLastColumn(),1)).getValues()[0].includes('MustChangePassword');
-  if (missingCore || !assessments || !staff || !ss.getSheetByName('CONTRACTS') || missingPatientGroup || missingAssessmentData || missingStaffCitizenId || missingMustChangePassword) setupSystem();
+  if (missingCore || !assessments || !staff || !ss.getSheetByName('CONTRACTS') || missingPatientGroup || missingAssessmentData || missingStaffCitizenId || missingStaffUserId || missingMustChangePassword) setupSystem();
   cache.put(readyCacheKey_(), '1', PERFORMANCE.READY_TTL);
 }
 
@@ -166,6 +167,8 @@ function route_(action, payload, event) {
     case 'saveAlert': return savePatientLinkedRecord_('ALERTS', 'AlertID', 'AL', payload.data, ctx);
     case 'listStaff': return listStaff_(payload, ctx);
     case 'saveStaff': requireRole_(ctx, ['admin','manager','cm']); return saveRecord_('STAFF', 'StaffID', 'ST', payload.data, ctx);
+    case 'getMyStaffProfile': requireRole_(ctx, ['cg']); return getMyStaffProfile_(ctx);
+    case 'saveMyStaffProfile': requireRole_(ctx, ['cg']); return saveMyStaffProfile_(payload.data, ctx);
     case 'getContractMaster': requireRole_(ctx, ['admin','manager','cm']); return getContractMaster_(ctx);
     case 'saveContractMaster': requireRole_(ctx, ['admin','manager','cm']); return saveContractMaster_(payload.data, ctx);
     case 'listContracts': requireRole_(ctx, ['admin','manager','cm']); return listRecords_('CONTRACTS', payload, ctx);
@@ -371,6 +374,61 @@ function listStaff_(payload, ctx) {
     rows = rows.map(row => fields.reduce((item,field) => { item[field]=row[field]; return item; },{}));
   }
   return {ok:true,data:rows,total:total,limit:limit,offset:offset};
+}
+
+// ผูกบัญชี CG กับระเบียนบุคลากรของตนเอง เพื่อให้แก้ไขข้อมูลส่วนตัวได้โดยไม่เห็นข้อมูลลับของบุคลากรคนอื่น
+function findMyStaffProfile_(ctx) {
+  const rows = rowsAsObjects_('STAFF');
+  const byUserId = rows.find(row => String(row.UserID || '') === String(ctx.userId));
+  if (byUserId) return byUserId;
+  const identities = [ctx.username,ctx.displayName].map(normalizeAssignee_).filter(Boolean);
+  return rows.find(row => {
+    if (row.UserID || String(row.Role || '').trim().toLowerCase() !== 'cg') return false;
+    const firstName = normalizeAssignee_(row.FirstName);
+    const fullName = normalizeAssignee_((String(row.FirstName || '')+' '+String(row.LastName || '')).trim());
+    return identities.some(identity => identity === firstName || identity === fullName);
+  }) || null;
+}
+
+function ensureMyStaffProfile_(ctx) {
+  let profile = findMyStaffProfile_(ctx);
+  if (profile) {
+    if (!profile.UserID) {
+      updateById_('STAFF','StaffID',profile.StaffID,{UserID:ctx.userId,UpdatedAt:new Date(),UpdatedBy:ctx.username});
+      profile = Object.assign({},profile,{UserID:ctx.userId});
+    }
+    return profile;
+  }
+  const now = new Date();
+  const row = {
+    StaffID:makeId_('ST'),UserID:ctx.userId,FirstName:ctx.displayName || ctx.username,LastName:'',Role:'CG',Status:'active',
+    CreatedAt:now,CreatedBy:ctx.username,UpdatedAt:now,UpdatedBy:ctx.username
+  };
+  appendObject_('STAFF',row);
+  audit_(ctx,'CREATE_SELF_PROFILE','STAFF',row.StaffID,'สร้างข้อมูลบุคลากรสำหรับบัญชี CG');
+  return row;
+}
+
+function getMyStaffProfile_(ctx) {
+  const profile = ensureMyStaffProfile_(ctx);
+  audit_(ctx,'READ_SELF_PROFILE','STAFF',profile.StaffID,'เปิดดูข้อมูลบุคลากรของตนเอง');
+  return {ok:true,data:profile};
+}
+
+function saveMyStaffProfile_(data, ctx) {
+  if (!data || typeof data !== 'object') throw new Error('ข้อมูลส่วนตัวไม่ถูกต้อง');
+  const profile = ensureMyStaffProfile_(ctx);
+  const allowed = ['Prefix','FirstName','LastName','CitizenID','BirthDate','Age','Phone','Address','HouseNo','Moo','Village','Subdistrict','District','Province','BankName','BankBranch','BankAccountName','BankAccountNo','TrainingDate','CertificateExpiry','Notes'];
+  const clean = sanitizeObject_(data,allowed);
+  const firstName = String(clean.FirstName !== undefined ? clean.FirstName : profile.FirstName || '').trim();
+  const lastName = String(clean.LastName !== undefined ? clean.LastName : profile.LastName || '').trim();
+  if (!firstName || !lastName) throw new Error('กรุณาระบุชื่อและนามสกุลให้ครบ');
+  clean.UpdatedAt = new Date();
+  clean.UpdatedBy = ctx.username;
+  if (!updateById_('STAFF','StaffID',profile.StaffID,clean)) throw new Error('ไม่พบข้อมูลบุคลากรของคุณ');
+  audit_(ctx,'UPDATE_SELF_PROFILE','STAFF',profile.StaffID,'แก้ไขข้อมูลบุคลากรของตนเอง');
+  const updated = rowsAsObjects_('STAFF').find(row => String(row.StaffID) === String(profile.StaffID));
+  return {ok:true,id:profile.StaffID,data:updated || Object.assign({},profile,clean)};
 }
 
 function getRecord_(sheetName, id, ctx) {
