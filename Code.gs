@@ -6,7 +6,7 @@
  */
 
 const APP = {
-  VERSION: '1.13.0',
+  VERSION: '1.14.0',
   TZ: 'Asia/Bangkok',
   SESSION_HOURS: 8,
   DEFAULT_ADMIN: 'admin',
@@ -606,17 +606,21 @@ function uploadVisitPhotos_(photos, patientId, ctx) {
   if (photos.length > 4) throw new Error('แนบรูปได้ครั้งละไม่เกิน 4 รูป');
   const folder = getVisitPhotoFolder_();
   const allowed = ['image/jpeg','image/png','image/webp'];
-  const saved = photos.map((photo, index) => {
+  // ตรวจสอบทุกรูปให้ผ่านก่อนสร้างไฟล์ ป้องกันกรณีบันทึกได้เพียงบางรูป
+  const prepared = photos.map((photo, index) => {
     const match = String(photo && photo.dataUrl || '').match(/^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/);
     if (!match || !allowed.includes(match[1])) throw new Error('รูปที่ '+(index+1)+' ไม่ใช่ไฟล์ JPG, PNG หรือ WEBP');
     const bytes = Utilities.base64Decode(match[2]);
     if (bytes.length > 1500000) throw new Error('รูปที่ '+(index+1)+' มีขนาดใหญ่เกิน 1.5 MB');
     const ext = match[1] === 'image/png' ? '.png' : match[1] === 'image/webp' ? '.webp' : '.jpg';
     const base = String(photo.name || 'visit-photo').replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9ก-๙_-]/g, '_').substring(0,60) || 'visit-photo';
-    const fileName = Utilities.formatDate(new Date(), APP.TZ, 'yyyyMMdd-HHmmss')+'_'+String(patientId || 'patient').replace(/[^a-zA-Z0-9_-]/g,'')+'_'+(index+1)+'_'+base+ext;
-    const file = folder.createFile(Utilities.newBlob(bytes, match[1], fileName));
+    return {bytes:bytes,mimeType:match[1],ext:ext,base:base,index:index};
+  });
+  const saved = prepared.map(item => {
+    const fileName = Utilities.formatDate(new Date(), APP.TZ, 'yyyyMMdd-HHmmss')+'_'+String(patientId || 'patient').replace(/[^a-zA-Z0-9_-]/g,'')+'_'+(item.index+1)+'_'+item.base+item.ext;
+    const file = folder.createFile(Utilities.newBlob(item.bytes, item.mimeType, fileName));
     file.setDescription('ภาพหลักฐานการเยี่ยมบ้านผู้ป่วย LTC อัปโหลดโดย '+ctx.username);
-    return {fileId:file.getId(),name:fileName,mimeType:match[1]};
+    return {fileId:file.getId(),name:fileName,mimeType:item.mimeType};
   });
   audit_(ctx,'UPLOAD_PHOTO','VISITS',String(patientId || ''),'แนบรูปหลักฐาน '+saved.length+' รูป');
   return {ok:true,data:saved};
@@ -628,7 +632,7 @@ function getVisitPhotos_(visitId, ctx) {
   if (!visit) throw new Error('ไม่พบข้อมูลการเยี่ยมบ้าน');
   assertPatientAccess_(visit.PatientID,ctx);
   const refs = parseVisitPhotoRefs_(visit.PhotoURL);
-  const data = refs.slice(0,8).map(ref => {
+  const data = refs.slice(0,4).map(ref => {
     try {
       const file = DriveApp.getFileById(ref.fileId);
       const blob = file.getBlob();
