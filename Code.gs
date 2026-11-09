@@ -6,7 +6,7 @@
  */
 
 const APP = {
-  VERSION: '1.14.0',
+  VERSION: '1.15.0',
   TZ: 'Asia/Bangkok',
   SESSION_HOURS: 8,
   DEFAULT_ADMIN: 'admin',
@@ -74,6 +74,7 @@ const DEFAULT_CG_USERS = ['งามฉัตร','สุลาวรรณ','�
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('ระบบ LTC')
     .addItem('ติดตั้ง/ซ่อมแซมโครงสร้างระบบ', 'setupSystem')
+    .addItem('อนุญาตการแนบรูปเยี่ยมบ้าน', 'authorizeVisitPhotoStorage')
     .addItem('รีเซ็ตรหัส admin เป็น 1234', 'resetAdminPassword')
     .addItem('ล้าง Session ที่หมดอายุ', 'cleanupSessions')
     .addToUi();
@@ -653,17 +654,37 @@ function parseVisitPhotoRefs_(value) {
 }
 
 function getVisitPhotoFolder_() {
-  const props = PropertiesService.getScriptProperties();
-  const key = 'LTC_VISIT_PHOTO_FOLDER_ID';
-  const existing = props.getProperty(key);
-  if (existing) {
-    try { return DriveApp.getFolderById(existing); } catch (e) {}
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const key = 'LTC_VISIT_PHOTO_FOLDER_ID';
+    const existing = props.getProperty(key);
+    if (existing) {
+      try { return DriveApp.getFolderById(existing); } catch (e) {
+        if (isDriveAuthorizationError_(e)) throw e;
+      }
+    }
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const safeName = String(ss.getName() || 'LTC').replace(/[\\/:*?"<>|]/g,'-').substring(0,80);
+    const folder = DriveApp.createFolder('LTC Visit Evidence - '+safeName);
+    props.setProperty(key, folder.getId());
+    return folder;
+  } catch (e) {
+    if (isDriveAuthorizationError_(e)) throw new Error('ระบบยังไม่ได้รับสิทธิ์ Google Drive กรุณาให้ Admin เปิด Google Sheet แล้วเลือกเมนู ระบบ LTC > อนุญาตการแนบรูปเยี่ยมบ้าน จากนั้นกดอนุญาตและลองบันทึกอีกครั้ง');
+    throw e;
   }
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const safeName = String(ss.getName() || 'LTC').replace(/[\\/:*?"<>|]/g,'-').substring(0,80);
-  const folder = DriveApp.createFolder('LTC Visit Evidence - '+safeName);
-  props.setProperty(key, folder.getId());
-  return folder;
+}
+
+function isDriveAuthorizationError_(error) {
+  return /DriveApp|googleapis\.com\/auth\/drive|authorization|permission|ไม่ได้รับอนุญาต|สิทธิ์/i.test(String(error && error.message ? error.message : error));
+}
+
+// เรียกจากเมนู Google Sheet เพียงครั้งเดียว เพื่อขอสิทธิ์ Drive สำหรับเก็บรูปหลักฐาน
+function authorizeVisitPhotoStorage() {
+  const folder = getVisitPhotoFolder_();
+  const testFile = folder.createFile(Utilities.newBlob('LTC photo storage authorization test', 'text/plain', 'LTC-photo-permission-test.txt'));
+  testFile.setTrashed(true);
+  SpreadsheetApp.getUi().alert('อนุญาตการแนบรูปเรียบร้อยแล้ว สามารถกลับไปบันทึกการเยี่ยมบ้านได้');
+  return {ok:true,folderId:folder.getId()};
 }
 
 function getContractMaster_(ctx) {
