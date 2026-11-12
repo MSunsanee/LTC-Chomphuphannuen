@@ -6,7 +6,7 @@
  */
 
 const APP = {
-  VERSION: '1.20.0',
+  VERSION: '1.21.0',
   TZ: 'Asia/Bangkok',
   SESSION_HOURS: 8,
   DEFAULT_ADMIN: 'admin',
@@ -301,12 +301,25 @@ function normalizeAssignee_(value) {
     .trim();
 }
 
+function cgIdentityAliases_(ctx) {
+  if (!isCg_(ctx)) return [];
+  if (Array.isArray(ctx._cgIdentityAliases)) return ctx._cgIdentityAliases;
+  const values = [ctx.username,ctx.displayName];
+  const profile = findMyStaffProfile_(ctx);
+  if (profile) {
+    values.push(profile.FirstName);
+    values.push((String(profile.FirstName || '')+' '+String(profile.LastName || '')).trim());
+    values.push((String(profile.Prefix || '')+String(profile.FirstName || '')+' '+String(profile.LastName || '')).trim());
+  }
+  ctx._cgIdentityAliases = [...new Set(values.map(normalizeAssignee_).filter(Boolean))];
+  return ctx._cgIdentityAliases;
+}
+
 function isPatientAssignedTo_(patient, ctx) {
   if (!isCg_(ctx)) return true;
   const assigned = normalizeAssignee_(patient && patient.CG);
   if (!assigned) return false;
-  const identities = [ctx.username,ctx.displayName].map(normalizeAssignee_).filter(Boolean);
-  return identities.some(identity => assigned === identity || assigned.includes(identity));
+  return cgIdentityAliases_(ctx).some(identity => assigned === identity || assigned.includes(identity) || identity.includes(assigned));
 }
 
 function assignedPatientIds_(ctx) {
@@ -463,7 +476,7 @@ function listRecords_(sheetName, payload, ctx) {
   if (sheetName === 'VISITS' && payload.month) {
     const month = String(payload.month).trim();
     if (!/^\d{4}-\d{2}$/.test(month)) throw new Error('รูปแบบเดือนไม่ถูกต้อง');
-    rows = rows.filter(r => dateOnly_(r.VisitDate || r.ScheduleDate).substring(0,7) === month);
+    rows = rows.filter(r => dateOnly_(r.VisitDate || r.ScheduleDate || r.CreatedAt).substring(0,7) === month);
   }
   if (payload.status) rows = rows.filter(r => String(r.Status).toLowerCase() === String(payload.status).toLowerCase());
   const total = rows.length;
@@ -646,6 +659,10 @@ function saveRecord_(sheetName, idField, prefix, data, ctx) {
 function saveVisit_(data, ctx) {
   if (!data || !data.PatientID) throw new Error('กรุณาเลือกผู้ป่วย');
   const visitData = Object.assign({},data);
+  visitData.VisitDate = dateOnly_(visitData.VisitDate || visitData.ScheduleDate || new Date());
+  if (!visitData.ScheduleDate) visitData.ScheduleDate = visitData.VisitDate;
+  const visitStatus = String(visitData.Status || '').trim();
+  visitData.Status = ['completed','complete','สำเร็จ','เยี่ยมแล้ว'].includes(visitStatus.toLowerCase()) || !visitStatus ? 'เยี่ยมสำเร็จ' : visitStatus;
   if (isCg_(ctx)) visitData.Visitor = visitorNameForCtx_(ctx);
   if (!String(visitData.Visitor || '').trim()) throw new Error('ไม่พบชื่อผู้เยี่ยม');
   assertPatientAccess_(visitData.PatientID,ctx);
