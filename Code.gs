@@ -6,7 +6,7 @@
  */
 
 const APP = {
-  VERSION: '1.16.0',
+  VERSION: '1.17.0',
   TZ: 'Asia/Bangkok',
   SESSION_HOURS: 8,
   DEFAULT_ADMIN: 'admin',
@@ -683,7 +683,8 @@ function authorizeVisitPhotoStorage() {
   const folder = getVisitPhotoFolder_();
   const testFile = folder.createFile(Utilities.newBlob('LTC photo storage authorization test', 'text/plain', 'LTC-photo-permission-test.txt'));
   testFile.setTrashed(true);
-  SpreadsheetApp.getUi().alert('อนุญาตการแนบรูปเรียบร้อยแล้ว สามารถกลับไปบันทึกการเยี่ยมบ้านได้');
+  // ใช้ toast ซึ่งไม่หยุดการทำงาน ต่างจาก Ui.alert ที่รอผู้ใช้กดปิดและอาจหมดเวลาเมื่อเรียกจากหน้า Apps Script
+  SpreadsheetApp.getActiveSpreadsheet().toast('อนุญาตการแนบรูปเรียบร้อยแล้ว สามารถกลับไปบันทึกการเยี่ยมบ้านได้', 'ระบบ LTC', 8);
   return {ok:true,folderId:folder.getId()};
 }
 
