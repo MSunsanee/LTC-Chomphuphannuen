@@ -6,7 +6,7 @@
  */
 
 const APP = {
-  VERSION: '1.17.0',
+  VERSION: '1.18.0',
   TZ: 'Asia/Bangkok',
   SESSION_HOURS: 8,
   DEFAULT_ADMIN: 'admin',
@@ -292,7 +292,11 @@ function cgWorkload_(patients, ctx) {
   const currentPatients = (patients || []).filter(isCurrentCarePatient_);
   if (isCg_(ctx)) {
     return {
-      items:[{name:visitorNameForCtx_(ctx) || ctx.displayName || ctx.username,count:currentPatients.length}],
+      items:[{
+        name:visitorNameForCtx_(ctx) || ctx.displayName || ctx.username,
+        count:currentPatients.length,
+        patientIds:currentPatients.map(patient => String(patient.PatientID || '')).filter(Boolean)
+      }],
       assigned:currentPatients.length,
       unassigned:0
     };
@@ -310,7 +314,7 @@ function cgWorkload_(patients, ctx) {
       normalized.forEach(alias => { if (!existing.aliases.includes(alias)) existing.aliases.push(alias); });
       return existing;
     }
-    const entry = {name:displayName,count:0,aliases:normalized};
+    const entry = {name:displayName,count:0,aliases:normalized,patientIds:[]};
     entries.push(entry);
     return entry;
   };
@@ -333,9 +337,12 @@ function cgWorkload_(patients, ctx) {
     if (!assigned) { unassigned++; return; }
     let entry = entries.find(item => item.aliases.some(alias => assigned === alias || assigned.includes(alias) || alias.includes(assigned)));
     if (!entry) entry = addEntry(String(patient.CG).trim(),[patient.CG]);
-    if (entry) entry.count++;
+    if (entry) {
+      entry.count++;
+      if (patient.PatientID) entry.patientIds.push(String(patient.PatientID));
+    }
   });
-  const items = entries.map(entry => ({name:entry.name,count:entry.count})).sort((a,b) => b.count-a.count || String(a.name).localeCompare(String(b.name),'th'));
+  const items = entries.map(entry => ({name:entry.name,count:entry.count,patientIds:entry.patientIds})).sort((a,b) => b.count-a.count || String(a.name).localeCompare(String(b.name),'th'));
   return {items:items,assigned:items.reduce((sum,item) => sum+item.count,0),unassigned:unassigned};
 }
 
