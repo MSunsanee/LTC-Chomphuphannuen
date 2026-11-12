@@ -6,7 +6,7 @@
  */
 
 const APP = {
-  VERSION: '1.19.0',
+  VERSION: '1.20.0',
   TZ: 'Asia/Bangkok',
   SESSION_HOURS: 8,
   DEFAULT_ADMIN: 'admin',
@@ -74,6 +74,7 @@ const DEFAULT_CG_USERS = ['งามฉัตร','สุลาวรรณ','�
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('ระบบ LTC')
     .addItem('ติดตั้ง/ซ่อมแซมโครงสร้างระบบ', 'setupSystem')
+    .addItem('เติมกลุ่มผู้ป่วยจากข้อมูลเดิม', 'backfillPatientGroups')
     .addItem('อนุญาตการแนบรูปเยี่ยมบ้าน', 'authorizeVisitPhotoStorage')
     .addItem('รีเซ็ตรหัส admin เป็น 1234', 'resetAdminPassword')
     .addItem('ล้าง Session ที่หมดอายุ', 'cleanupSessions')
@@ -87,6 +88,7 @@ function setupSystem() {
   const hadMustChangePassword = usersBeforeSetup && usersBeforeSetup.getLastColumn() && usersBeforeSetup.getRange(1,1,1,usersBeforeSetup.getLastColumn()).getValues()[0].includes('MustChangePassword');
   Object.keys(APP.SHEETS).forEach(name => ensureSheet_(ss, name, APP.SHEETS[name]));
   clearSensitiveStaffData_();
+  backfillPatientGroups_();
   seedSettings_();
   seedAdmin_();
   seedCgUsers_(!hadMustChangePassword);
@@ -112,8 +114,51 @@ function ensureSystemReady_() {
   const missingStaffUserId = staff && !staff.getRange(1,1,1,Math.max(staff.getLastColumn(),1)).getValues()[0].includes('UserID');
   const missingMustChangePassword = users && !users.getRange(1,1,1,Math.max(users.getLastColumn(),1)).getValues()[0].includes('MustChangePassword');
   if (missingCore || !assessments || !staff || !ss.getSheetByName('CONTRACTS') || missingPatientGroup || missingAssessmentData || missingStaffUserId || missingMustChangePassword) setupSystem();
-  else clearSensitiveStaffData_();
+  else {
+    clearSensitiveStaffData_();
+    backfillPatientGroups_();
+  }
   cache.put(readyCacheKey_(), '1', PERFORMANCE.READY_TTL);
+}
+
+// ข้อมูลเดิมบางชุดเก็บเลขกลุ่ม 1-4 ไว้ใน DependencyLevel
+// เติมกลับเข้า PatientGroup โดยไม่เขียนทับกลุ่มที่กำหนดไว้อยู่แล้ว
+function normalizePatientGroup_(value) {
+  let text = String(value == null ? '' : value);
+  if (typeof text.normalize === 'function') text = text.normalize('NFKC');
+  const match = text.trim().match(/^(?:กลุ่ม\s*)?([1-4])(?:\.0+)?$/i);
+  return match ? match[1] : '';
+}
+
+function backfillPatientGroups_() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('PATIENTS');
+  if (!sheet || sheet.getLastRow() < 2 || sheet.getLastColumn() < 1) return {updated:0,unresolved:0};
+  const headers = sheet.getRange(1,1,1,sheet.getLastColumn()).getValues()[0].map(String);
+  const patientGroupCol = headers.indexOf('PatientGroup');
+  const dependencyCol = headers.indexOf('DependencyLevel');
+  if (patientGroupCol < 0 || dependencyCol < 0) return {updated:0,unresolved:0};
+  const rowCount = sheet.getLastRow()-1;
+  const patientGroups = sheet.getRange(2,patientGroupCol+1,rowCount,1).getValues();
+  const dependencies = sheet.getRange(2,dependencyCol+1,rowCount,1).getValues();
+  let updated = 0, unresolved = 0;
+  patientGroups.forEach((row,index) => {
+    if (normalizePatientGroup_(row[0])) return;
+    const group = normalizePatientGroup_(dependencies[index][0]);
+    if (group) { row[0] = group; updated++; }
+    else unresolved++;
+  });
+  if (updated) {
+    sheet.getRange(2,patientGroupCol+1,rowCount,1).setValues(patientGroups);
+    clearDataCache_('PATIENTS');
+  }
+  return {updated:updated,unresolved:unresolved};
+}
+
+function backfillPatientGroups() {
+  const result = backfillPatientGroups_();
+  const message = 'เติมกลุ่มผู้ป่วยแล้ว '+result.updated+' ราย'+(result.unresolved ? ' • ยังไม่มีเลขกลุ่มในข้อมูลเดิม '+result.unresolved+' ราย' : ' • ครบทุกคนแล้ว');
+  SpreadsheetApp.getActiveSpreadsheet().toast(message, 'ระบบ LTC', 10);
+  return {ok:true,updated:result.updated,unresolved:result.unresolved,message:message};
 }
 
 function doGet(e) {
@@ -569,6 +614,10 @@ function saveRecord_(sheetName, idField, prefix, data, ctx) {
   if (!data || typeof data !== 'object') throw new Error('ข้อมูลไม่ถูกต้อง');
   const now = new Date();
   const clean = sanitizeObject_(data, APP.SHEETS[sheetName]);
+  if (sheetName === 'PATIENTS' && !normalizePatientGroup_(clean.PatientGroup)) {
+    const group = normalizePatientGroup_(clean.DependencyLevel);
+    if (group) clean.PatientGroup = group;
+  }
   if (isCg_(ctx) && APP.SHEETS[sheetName].includes('PatientID')) {
     if (clean[idField]) {
       const existing = rowsAsObjects_(sheetName).find(row => String(row[idField]) === String(clean[idField]));
