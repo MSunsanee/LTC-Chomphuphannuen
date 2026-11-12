@@ -6,7 +6,7 @@
  */
 
 const APP = {
-  VERSION: '1.18.0',
+  VERSION: '1.19.0',
   TZ: 'Asia/Bangkok',
   SESSION_HOURS: 8,
   DEFAULT_ADMIN: 'admin',
@@ -611,7 +611,7 @@ function saveVisit_(data, ctx) {
 function uploadVisitPhotos_(photos, patientId, ctx) {
   assertPatientAccess_(patientId,ctx);
   if (!Array.isArray(photos) || !photos.length) throw new Error('ไม่พบรูปภาพสำหรับอัปโหลด');
-  if (photos.length > 4) throw new Error('แนบรูปได้ครั้งละไม่เกิน 4 รูป');
+  if (photos.length > 10) throw new Error('แนบรูปได้ครั้งละไม่เกิน 10 รูป');
   const folder = getVisitPhotoFolder_();
   const allowed = ['image/jpeg','image/png','image/webp'];
   // ตรวจสอบทุกรูปให้ผ่านก่อนสร้างไฟล์ ป้องกันกรณีบันทึกได้เพียงบางรูป
@@ -640,7 +640,7 @@ function getVisitPhotos_(visitId, ctx) {
   if (!visit) throw new Error('ไม่พบข้อมูลการเยี่ยมบ้าน');
   assertPatientAccess_(visit.PatientID,ctx);
   const refs = parseVisitPhotoRefs_(visit.PhotoURL);
-  const data = refs.slice(0,4).map(ref => {
+  const data = refs.slice(0,10).map(ref => {
     try {
       const file = DriveApp.getFileById(ref.fileId);
       const blob = file.getBlob();
