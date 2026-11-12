@@ -6,7 +6,7 @@
  */
 
 const APP = {
-  VERSION: '1.21.0',
+  VERSION: '1.22.0',
   TZ: 'Asia/Bangkok',
   SESSION_HOURS: 8,
   DEFAULT_ADMIN: 'admin',
@@ -659,6 +659,7 @@ function saveRecord_(sheetName, idField, prefix, data, ctx) {
 function saveVisit_(data, ctx) {
   if (!data || !data.PatientID) throw new Error('กรุณาเลือกผู้ป่วย');
   const visitData = Object.assign({},data);
+  const previousVisit = visitData.VisitID ? rowsAsObjects_('VISITS').find(row => String(row.VisitID) === String(visitData.VisitID)) : null;
   visitData.VisitDate = dateOnly_(visitData.VisitDate || visitData.ScheduleDate || new Date());
   if (!visitData.ScheduleDate) visitData.ScheduleDate = visitData.VisitDate;
   const visitStatus = String(visitData.Status || '').trim();
@@ -666,7 +667,10 @@ function saveVisit_(data, ctx) {
   if (isCg_(ctx)) visitData.Visitor = visitorNameForCtx_(ctx);
   if (!String(visitData.Visitor || '').trim()) throw new Error('ไม่พบชื่อผู้เยี่ยม');
   assertPatientAccess_(visitData.PatientID,ctx);
+  const managesPhotos = Object.prototype.hasOwnProperty.call(visitData,'PhotoURL');
+  if (managesPhotos) visitData.PhotoURL = JSON.stringify(validateVisitPhotoRefs_(visitData.PhotoURL));
   const result = saveRecord_('VISITS','VisitID','VS',visitData,ctx);
+  if (managesPhotos && previousVisit) result.removedPhotos = trashRemovedVisitPhotos_(previousVisit.PhotoURL,visitData.PhotoURL,result.id);
   if (visitData.PatientID && visitData.VisitDate) updateById_('PATIENTS','PatientID',visitData.PatientID,{LastVisit:visitData.VisitDate,NextVisit:visitData.NextVisit || '',UpdatedAt:new Date(),UpdatedBy:ctx.username});
   const alerts = detectAlerts_(visitData, ctx);
   result.alerts = alerts;
@@ -711,7 +715,7 @@ function getVisitPhotos_(visitId, ctx) {
       const file = DriveApp.getFileById(ref.fileId);
       const blob = file.getBlob();
       const mimeType = blob.getContentType() || ref.mimeType || 'image/jpeg';
-      return {name:ref.name || file.getName(),dataUrl:'data:'+mimeType+';base64,'+Utilities.base64Encode(blob.getBytes())};
+      return {fileId:ref.fileId,name:ref.name || file.getName(),mimeType:mimeType,dataUrl:'data:'+mimeType+';base64,'+Utilities.base64Encode(blob.getBytes())};
     } catch (e) { return null; }
   }).filter(Boolean);
   audit_(ctx,'READ_PHOTO','VISITS',visitId,'เปิดรูปหลักฐานการเยี่ยมบ้าน');
@@ -724,6 +728,42 @@ function parseVisitPhotoRefs_(value) {
     const refs = typeof value === 'string' ? JSON.parse(value) : value;
     return Array.isArray(refs) ? refs.filter(x => x && x.fileId) : [];
   } catch (e) { return []; }
+}
+
+function validateVisitPhotoRefs_(value) {
+  const refs = parseVisitPhotoRefs_(value);
+  if (refs.length > 10) throw new Error('การเยี่ยมหนึ่งครั้งแนบรูปได้รวมไม่เกิน 10 รูป');
+  if (!refs.length) return [];
+  const folderId = getVisitPhotoFolder_().getId(), seen = {};
+  return refs.map(ref => {
+    const fileId = String(ref.fileId || '').trim();
+    if (!fileId || seen[fileId]) return null;
+    const file = DriveApp.getFileById(fileId);
+    let belongsToFolder = false, parents = file.getParents();
+    while (parents.hasNext()) if (parents.next().getId() === folderId) { belongsToFolder = true; break; }
+    if (!belongsToFolder) throw new Error('พบรูปภาพที่ไม่ได้อยู่ในพื้นที่จัดเก็บของระบบ LTC');
+    seen[fileId] = true;
+    const mimeType = String(ref.mimeType || file.getMimeType() || 'image/jpeg');
+    if (!/^image\/(?:jpeg|png|webp)$/i.test(mimeType)) throw new Error('พบไฟล์แนบที่ไม่ใช่รูปภาพที่รองรับ');
+    return {fileId:fileId,name:String(ref.name || file.getName()),mimeType:mimeType};
+  }).filter(Boolean);
+}
+
+function trashRemovedVisitPhotos_(previousValue, nextValue, visitId) {
+  const before = parseVisitPhotoRefs_(previousValue), afterIds = new Set(parseVisitPhotoRefs_(nextValue).map(ref => String(ref.fileId)));
+  const removedIds = [...new Set(before.map(ref => String(ref.fileId || '')).filter(fileId => fileId && !afterIds.has(fileId)))];
+  if (!removedIds.length) return 0;
+  const otherReferences = new Set();
+  rowsAsObjects_('VISITS').forEach(visit => {
+    if (String(visit.VisitID) === String(visitId)) return;
+    parseVisitPhotoRefs_(visit.PhotoURL).forEach(ref => otherReferences.add(String(ref.fileId)));
+  });
+  let trashed = 0;
+  removedIds.forEach(fileId => {
+    if (otherReferences.has(fileId)) return;
+    try { DriveApp.getFileById(fileId).setTrashed(true); trashed++; } catch (e) {}
+  });
+  return trashed;
 }
 
 function getVisitPhotoFolder_() {
