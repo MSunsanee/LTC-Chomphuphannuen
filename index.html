@@ -375,7 +375,29 @@
     }catch(err){win.close();toast('เตรียมชุดเอกสารประจำเดือนไม่สำเร็จ: '+err.message,true)}
   }
   function table(rows,cols,page){if(!rows.length)return '<div class="card empty">ยังไม่มีข้อมูลในส่วนนี้</div>';return `<div class="table-wrap"><table class="data-table table-${page}"><thead><tr>${cols.map(c=>`<th>${c[1]}</th>`).join('')}<th>จัดการ</th></tr></thead><tbody>${rows.map(r=>`<tr>${cols.map(c=>`<td>${cell(r,c[0],page)}</td>`).join('')}<td>${editButton(page,r)}</td></tr>`).join('')}</tbody></table></div>`}
-  function cell(r,k,page){let v=k==='name'?`${r.Prefix||''}${r.FirstName||''} ${r.LastName||''}`:r[k];if(page==='patients'&&k==='name'){const id=String(r.PatientID||'').replace(/["'<>]/g,'');return `<button class="patient-link" title="กดเพื่อทำแบบประเมิน" onclick="openAssessmentChooser('${id}')">${esc(v||'-')}</button>`}if(page==='patients'&&k==='CG'){const canAssign=['admin','manager','cm'].includes(String(STATE.user?.role||'').toLowerCase());if(!canAssign)return esc(v||'ยังไม่มอบหมาย');const id=String(r.PatientID||'').replace(/["'<>]/g,'');return `<select class="assign-select" aria-label="มอบหมาย CG" onchange="assignPatientCg('${id}',this)"><option value="">ยังไม่มอบหมาย</option>${cgNameOptions(v).map(cg=>`<option value="${attr(cg)}" ${String(v)===cg?'selected':''}>${esc(cg)}</option>`).join('')}</select>`}if(k==='PatientID')v=patientName(v)||v;if(page==='contracts'&&k==='StaffID')v=staffName(v)||v;if(k==='Summary')return `<div class="result-text">${esc(v||'-')}</div>`;if(['Status','RiskLevel','Level','DependencyLevel'].includes(k)){const cls=/แดง|high|red|ฉุกเฉิน/.test(String(v).toLowerCase())?'red':/ส้ม|orange/.test(String(v).toLowerCase())?'orange':/เหลือง|yellow/.test(String(v).toLowerCase())?'yellow':'';return `<span class="badge ${cls}">${esc(v||'-')}</span>`}if(/Amount/.test(k))return Number(v||0).toLocaleString('th-TH',{minimumFractionDigits:2});return esc(shortDate(v)||'-')}
+  function cell(r,k,page){
+    let v=k==='name'?`${r.Prefix||''}${r.FirstName||''} ${r.LastName||''}`:r[k];
+    if(page==='contracts'&&k==='ContractNo')return esc(displayContractNo(v)||'-');
+    if(page==='patients'&&k==='name'){
+      const id=String(r.PatientID||'').replace(/["'<>]/g,'');
+      return `<button class="patient-link" title="กดเพื่อทำแบบประเมิน" onclick="openAssessmentChooser('${id}')">${esc(v||'-')}</button>`
+    }
+    if(page==='patients'&&k==='CG'){
+      const canAssign=['admin','manager','cm'].includes(String(STATE.user?.role||'').toLowerCase());
+      if(!canAssign)return esc(v||'ยังไม่มอบหมาย');
+      const id=String(r.PatientID||'').replace(/["'<>]/g,'');
+      return `<select class="assign-select" aria-label="มอบหมาย CG" onchange="assignPatientCg('${id}',this)"><option value="">ยังไม่มอบหมาย</option>${cgNameOptions(v).map(cg=>`<option value="${attr(cg)}" ${String(v)===cg?'selected':''}>${esc(cg)}</option>`).join('')}</select>`
+    }
+    if(k==='PatientID')v=patientName(v)||v;
+    if(page==='contracts'&&k==='StaffID')v=staffName(v)||v;
+    if(k==='Summary')return `<div class="result-text">${esc(v||'-')}</div>`;
+    if(['Status','RiskLevel','Level','DependencyLevel'].includes(k)){
+      const cls=/แดง|high|red|ฉุกเฉิน/.test(String(v).toLowerCase())?'red':/ส้ม|orange/.test(String(v).toLowerCase())?'orange':/เหลือง|yellow/.test(String(v).toLowerCase())?'yellow':'';
+      return `<span class="badge ${cls}">${esc(v||'-')}</span>`
+    }
+    if(/Amount/.test(k))return Number(v||0).toLocaleString('th-TH',{minimumFractionDigits:2});
+    return esc(shortDate(v)||'-')
+  }
   function editButton(page,r){const map={patients:['PATIENTS','PatientID'],visits:['VISITS','VisitID'],assessments:['ASSESSMENTS','AssessmentID'],careplans:['CARE_PLANS','CarePlanID'],staff:['STAFF','StaffID'],contracts:['CONTRACTS','ContractID'],equipment:['EQUIPMENT','EquipmentID'],budgets:['BUDGETS','BudgetID']};if(!map[page])return '—';const [schema,key]=map[page],id=String(r[key]).replace(/["'<>]/g,''),patientId=String(r.PatientID||'').replace(/["'<>]/g,''),label=page==='assessments'?'ดูผล / แก้ไข':'แก้ไข',isCg=String(STATE.user?.role||'').toLowerCase()==='cg';if(page==='patients')return `<div class="row-actions"><button class="btn btn-primary btn-sm" onclick="openAssessmentChooser('${id}')">✓ ประเมิน</button>${isCg?'':`<button class="btn btn-soft btn-sm" onclick='editRecord("${schema}","${id}")'>แก้ไข</button>`}</div>`;if(page==='visits')return `<div class="row-actions"><button class="btn btn-primary btn-sm" onclick="openAssessmentChooser('${patientId}')">✓ ประเมิน</button><button class="btn btn-outline btn-sm" onclick="printVisit('${id}')">▣ พิมพ์</button><button class="btn btn-soft btn-sm" onclick='editRecord("${schema}","${id}")'>แก้ไข</button></div>`;if(page==='careplans'&&isCg)return 'ดูข้อมูล';if(page==='staff'&&String(r.Role||'').toUpperCase()==='CG')return `<div class="row-actions"><button class="btn btn-primary btn-sm" onclick="openContract('${id}')">▤ ทำข้อตกลง</button><button class="btn btn-soft btn-sm" onclick='editRecord("${schema}","${id}")'>แก้ไข</button></div>`;if(page==='contracts')return `<div class="row-actions"><button class="btn btn-outline btn-sm" onclick="printContract('${id}')">▣ พิมพ์</button><button class="btn btn-soft btn-sm" onclick='editRecord("${schema}","${id}")'>แก้ไข</button></div>`;return `<button class="btn btn-soft btn-sm" onclick='editRecord("${schema}","${id}")'>${label}</button>`}
   async function printVisit(id){
     const summary=STATE.records.visits?.find(v=>String(v.VisitID)===String(id));if(!summary)return toast('ไม่พบข้อมูลการเยี่ยมบ้าน',true);
