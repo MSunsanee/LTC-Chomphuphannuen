@@ -6,7 +6,7 @@
  */
 
 const APP = {
-  VERSION: '1.22.0',
+  VERSION: '1.22.1',
   TZ: 'Asia/Bangkok',
   SESSION_HOURS: 8,
   DEFAULT_ADMIN: 'admin',
@@ -827,6 +827,7 @@ function saveContract_(data, ctx) {
   if (!staff) throw new Error('ไม่พบข้อมูล CG ที่เลือก');
   if (String(staff.Role || '').trim().toLowerCase() !== 'cg') throw new Error('บันทึกข้อตกลงจ้างนี้ใช้สำหรับบุคลากรบทบาท CG');
   const clean = Object.assign({},data);
+  if (Object.prototype.hasOwnProperty.call(clean,'ContractNo')) clean.ContractNo = normalizeContractNo_(clean.ContractNo);
   ['DurationMonths','MonthlyAmount','TotalAmount','PaymentEveryMonths','DailyDeduction'].forEach(key => {
     if (clean[key] === '' || clean[key] == null) clean[key] = '';
     else {
@@ -839,6 +840,27 @@ function saveContract_(data, ctx) {
   if (!clean.ContractDate) clean.ContractDate = dateOnly_(new Date());
   if (!clean.Status) clean.Status = 'ร่าง';
   return saveRecord_('CONTRACTS','ContractID','CT',clean,ctx);
+}
+
+// Google Sheets อาจตีความเลขที่สัญญา เช่น 3/2569 เป็นวันที่
+// จึงแปลงกลับเป็นรูปแบบ เลขลำดับ/ปี พ.ศ. ก่อนบันทึกทุกครั้ง
+function normalizeContractNo_(value) {
+  if (Object.prototype.toString.call(value) === '[object Date]' && !isNaN(value)) {
+    const month = Number(Utilities.formatDate(value,APP.TZ,'M'));
+    let year = Number(Utilities.formatDate(value,APP.TZ,'yyyy'));
+    if (year < 2400) year += 543;
+    return month+'/'+year;
+  }
+  const text = String(value == null ? '' : value).trim().replace(/^'/,'');
+  if (!text) return '';
+  const direct = text.match(/^0*(\d+)\s*\/\s*(\d{4})$/);
+  if (direct) return Number(direct[1])+'/'+direct[2];
+  const iso = text.match(/^(\d{4})-(\d{2})-\d{2}(?:T.*)?$/);
+  if (iso) {
+    const year = Number(iso[1]) < 2400 ? Number(iso[1])+543 : Number(iso[1]);
+    return Number(iso[2])+'/'+year;
+  }
+  return text;
 }
 
 function getContractPrintData_(id, ctx) {
