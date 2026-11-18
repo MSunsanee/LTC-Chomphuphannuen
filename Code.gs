@@ -6,7 +6,7 @@
  */
 
 const APP = {
-  VERSION: '1.22.3',
+  VERSION: '1.22.4',
   TZ: 'Asia/Bangkok',
   SESSION_HOURS: 8,
   DEFAULT_ADMIN: 'admin',
@@ -70,6 +70,7 @@ const CONTRACT_MASTER_DEFAULTS = {
 const CONTRACT_MASTER_KEYS = Object.keys(CONTRACT_MASTER_DEFAULTS);
 
 const DEFAULT_CG_USERS = ['งามฉัตร','สุลาวรรณ','บุญจัน','สันดอน','อัมพร','แสงจันทร์','จงกล','ศิราณี'];
+const MONTHLY_VISIT_TARGETS = {'1':2,'2':4,'3':4,'4':8};
 
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('ระบบ LTC')
@@ -198,7 +199,7 @@ function route_(action, payload, event) {
     case 'bootstrap': return { ok:true, user:userSummary_(auth), data:dashboard_(ctx,false).data };
     case 'me': return { ok: true, user:userSummary_(auth) };
     case 'logout': return logout_(payload.token, ctx);
-    case 'dashboard': return dashboard_(ctx, false);
+    case 'dashboard': return dashboard_(ctx, false, payload.month);
     case 'listPatients': return listRecords_('PATIENTS', payload, ctx);
     case 'getPatient': return getRecord_('PATIENTS', payload.id, ctx);
     case 'savePatient': requireRole_(ctx, ['admin','manager','cm']); return saveRecord_('PATIENTS', 'PatientID', 'PT', payload.data, ctx);
@@ -347,69 +348,70 @@ function isCurrentCarePatient_(patient) {
   return !['archived','เสียชีวิต','deceased','ย้ายพื้นที่','ส่งต่อ','referred'].includes(String(patient && patient.Status || '').trim().toLowerCase());
 }
 
-function cgWorkload_(patients, ctx) {
-  const currentPatients = (patients || []).filter(isCurrentCarePatient_);
+function completedVisit_(visit) {
+  return ['เยี่ยมสำเร็จ','completed','complete','สำเร็จ','เยี่ยมแล้ว'].includes(String(visit && visit.Status || '').trim().toLowerCase());
+}
+
+function cgMonthlyMetrics_(entry, patientById, visits, month) {
+  const patientIds = [...new Set(entry.patientIds.map(String).filter(Boolean))], idSet = new Set(patientIds);
+  const monthlyRequired = patientIds.reduce((sum,id) => {
+    const patient = patientById[id] || {}, group = normalizePatientGroup_(patient.PatientGroup) || normalizePatientGroup_(patient.DependencyLevel);
+    return sum + Number(MONTHLY_VISIT_TARGETS[group] || 0);
+  },0);
+  const completed = (visits || []).filter(visit => idSet.has(String(visit.PatientID || '')) && dateOnly_(visit.VisitDate || visit.ScheduleDate || visit.CreatedAt).substring(0,7) === month && completedVisit_(visit));
+  return {
+    name:entry.name,
+    count:patientIds.length,
+    patientIds:patientIds,
+    patientsVisited:new Set(completed.map(visit => String(visit.PatientID || '')).filter(Boolean)).size,
+    monthlyVisits:completed.length,
+    monthlyRequired:monthlyRequired,
+    monthlyRemaining:Math.max(monthlyRequired-completed.length,0)
+  };
+}
+
+function cgWorkload_(patients, ctx, visits, month) {
+  const currentPatients = (patients || []).filter(isCurrentCarePatient_), reportMonth = /^\d{4}-\d{2}$/.test(String(month || '')) ? String(month) : Utilities.formatDate(new Date(),APP.TZ,'yyyy-MM');
+  const patientById = currentPatients.reduce((map,patient) => { if (patient.PatientID) map[String(patient.PatientID)] = patient; return map; },{});
   if (isCg_(ctx)) {
-    return {
-      items:[{
-        name:visitorNameForCtx_(ctx) || ctx.displayName || ctx.username,
-        count:currentPatients.length,
-        patientIds:currentPatients.map(patient => String(patient.PatientID || '')).filter(Boolean)
-      }],
-      assigned:currentPatients.length,
-      unassigned:0
-    };
+    if (!currentPatients.length) return {items:[],assigned:0,unassigned:0,month:reportMonth};
+    const entry = {name:visitorNameForCtx_(ctx) || ctx.displayName || ctx.username,patientIds:currentPatients.map(patient => String(patient.PatientID || '')).filter(Boolean)};
+    return {items:[cgMonthlyMetrics_(entry,patientById,visits,reportMonth)],assigned:currentPatients.length,unassigned:0,month:reportMonth};
   }
 
   const users = rowsAsObjects_('USERS').filter(user => String(user.Role || '').trim().toLowerCase() === 'cg' && String(user.Status || 'active').trim().toLowerCase() === 'active');
-  const usersById = users.reduce((map,user) => { map[String(user.UserID || '')] = user; return map; },{});
-  const entries = [];
+  const usersById = users.reduce((map,user) => { map[String(user.UserID || '')] = user; return map; },{}), entries = [];
   const addEntry = (name, aliases) => {
-    const displayName = String(name || '').trim();
-    const normalized = [...new Set((aliases || []).concat([displayName]).map(normalizeAssignee_).filter(Boolean))];
+    const displayName = String(name || '').trim(), normalized = [...new Set((aliases || []).concat([displayName]).map(normalizeAssignee_).filter(Boolean))];
     if (!displayName || !normalized.length) return null;
     const existing = entries.find(entry => entry.aliases.some(alias => normalized.includes(alias)));
-    if (existing) {
-      normalized.forEach(alias => { if (!existing.aliases.includes(alias)) existing.aliases.push(alias); });
-      return existing;
-    }
-    const entry = {name:displayName,count:0,aliases:normalized,patientIds:[]};
-    entries.push(entry);
-    return entry;
+    if (existing) { normalized.forEach(alias => { if (!existing.aliases.includes(alias)) existing.aliases.push(alias); }); return existing; }
+    const entry = {name:displayName,aliases:normalized,patientIds:[]};entries.push(entry);return entry;
   };
 
+  // แสดงเฉพาะ CG ที่มีระเบียนอยู่จริงในทะเบียนบุคลากรเท่านั้น
   rowsAsObjects_('STAFF').filter(staff => String(staff.Role || '').trim().toLowerCase() === 'cg' && !['inactive','archived','ระงับ'].includes(String(staff.Status || '').trim().toLowerCase())).forEach(staff => {
-    const fullName = (String(staff.Prefix || '')+String(staff.FirstName || '')+' '+String(staff.LastName || '')).trim();
-    const user = usersById[String(staff.UserID || '')];
-    addEntry(fullName || (user && (user.DisplayName || user.Username)),[
-      staff.FirstName,
-      (String(staff.FirstName || '')+' '+String(staff.LastName || '')).trim(),
-      user && user.DisplayName,
-      user && user.Username
-    ]);
+    const fullName = staffFullName_(staff), user = usersById[String(staff.UserID || '')];
+    addEntry(fullName || (user && (user.DisplayName || user.Username)),[staff.FirstName,(String(staff.FirstName || '')+' '+String(staff.LastName || '')).trim(),user && user.DisplayName,user && user.Username]);
   });
-  users.forEach(user => addEntry(user.DisplayName || user.Username,[user.DisplayName,user.Username]));
 
   let unassigned = 0;
   currentPatients.forEach(patient => {
     const assigned = normalizeAssignee_(patient.CG);
     if (!assigned) { unassigned++; return; }
-    let entry = entries.find(item => item.aliases.some(alias => assigned === alias || assigned.includes(alias) || alias.includes(assigned)));
-    if (!entry) entry = addEntry(String(patient.CG).trim(),[patient.CG]);
-    if (entry) {
-      entry.count++;
-      if (patient.PatientID) entry.patientIds.push(String(patient.PatientID));
-    }
+    const entry = entries.find(item => item.aliases.some(alias => assigned === alias || assigned.includes(alias) || alias.includes(assigned)));
+    if (!entry) { unassigned++; return; }
+    if (patient.PatientID) entry.patientIds.push(String(patient.PatientID));
   });
-  const items = entries.map(entry => ({name:entry.name,count:entry.count,patientIds:entry.patientIds})).sort((a,b) => b.count-a.count || String(a.name).localeCompare(String(b.name),'th'));
-  return {items:items,assigned:items.reduce((sum,item) => sum+item.count,0),unassigned:unassigned};
+  const items = entries.filter(entry => entry.patientIds.length > 0).map(entry => cgMonthlyMetrics_(entry,patientById,visits,reportMonth)).sort((a,b) => String(a.name).localeCompare(String(b.name),'th'));
+  return {items:items,assigned:items.reduce((sum,item) => sum+item.count,0),unassigned:unassigned,month:reportMonth};
 }
 
-function dashboard_(ctx, isPublic) {
+function dashboard_(ctx, isPublic, workloadMonth) {
   const cache = CacheService.getScriptCache();
   const cacheKey = dashboardCacheKey_(isPublic);
-  const scopedForCg = isCg_(ctx);
-  if (!scopedForCg) {
+  const scopedForCg = isCg_(ctx), currentMonth = Utilities.formatDate(new Date(),APP.TZ,'yyyy-MM'), reportMonth = /^\d{4}-\d{2}$/.test(String(workloadMonth || '')) ? String(workloadMonth) : currentMonth, customMonth = reportMonth !== currentMonth;
+  if (!scopedForCg && !customMonth) {
     try {
       const cached = cache.get(cacheKey);
       if (cached) return {ok:true,data:JSON.parse(cached),public:isPublic,cached:true};
@@ -434,7 +436,7 @@ function dashboard_(ctx, isPublic) {
     risk: risks,
     updatedAt: now_()
   };
-  if (!isPublic && ctx) result.cgWorkload = cgWorkload_(patients,ctx);
+  if (!isPublic && ctx) result.cgWorkload = cgWorkload_(patients,ctx,visits,reportMonth);
   if (!isPublic && ctx && !scopedForCg) {
     const equipment = rowsAsObjects_('EQUIPMENT');
     const budgets = rowsAsObjects_('BUDGETS');
@@ -454,7 +456,7 @@ function dashboard_(ctx, isPublic) {
       percentUsed: plannedBudget > 0 ? Math.round(actualBudget / plannedBudget * 1000) / 10 : 0
     };
   }
-  if (!scopedForCg) {
+  if (!scopedForCg && !customMonth) {
     try { cache.put(cacheKey,JSON.stringify(result),PERFORMANCE.DASHBOARD_TTL); } catch (e) {}
   }
   return { ok:true, data:result, public:isPublic };
