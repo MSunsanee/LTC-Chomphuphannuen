@@ -6,7 +6,7 @@
  */
 
 const APP = {
-  VERSION: '1.22.1',
+  VERSION: '1.22.3',
   TZ: 'Asia/Bangkok',
   SESSION_HOURS: 8,
   DEFAULT_ADMIN: 'admin',
@@ -75,6 +75,7 @@ function onOpen() {
   SpreadsheetApp.getUi().createMenu('ระบบ LTC')
     .addItem('ติดตั้ง/ซ่อมแซมโครงสร้างระบบ', 'setupSystem')
     .addItem('เติมกลุ่มผู้ป่วยจากข้อมูลเดิม', 'backfillPatientGroups')
+    .addItem('ซิงก์ชื่อ CG ให้ตรงกันทั้งระบบ', 'syncAllCgNames')
     .addItem('อนุญาตการแนบรูปเยี่ยมบ้าน', 'authorizeVisitPhotoStorage')
     .addItem('รีเซ็ตรหัส admin เป็น 1234', 'resetAdminPassword')
     .addItem('ล้าง Session ที่หมดอายุ', 'cleanupSessions')
@@ -213,7 +214,7 @@ function route_(action, payload, event) {
     case 'listAlerts': return listRecords_('ALERTS', payload, ctx);
     case 'saveAlert': return savePatientLinkedRecord_('ALERTS', 'AlertID', 'AL', payload.data, ctx);
     case 'listStaff': return listStaff_(payload, ctx);
-    case 'saveStaff': requireRole_(ctx, ['admin','manager','cm']); return saveRecord_('STAFF', 'StaffID', 'ST', payload.data, ctx);
+    case 'saveStaff': requireRole_(ctx, ['admin','manager','cm']); return saveStaff_(payload.data, ctx);
     case 'getMyStaffProfile': requireRole_(ctx, ['cg']); return getMyStaffProfile_(ctx);
     case 'saveMyStaffProfile': requireRole_(ctx, ['cg']); return saveMyStaffProfile_(payload.data, ctx);
     case 'getContractMaster': requireRole_(ctx, ['admin','manager','cm']); return getContractMaster_(ctx);
@@ -600,9 +601,118 @@ function saveMyStaffProfile_(data, ctx) {
   clean.UpdatedAt = new Date();
   clean.UpdatedBy = ctx.username;
   if (!updateById_('STAFF','StaffID',profile.StaffID,clean)) throw new Error('ไม่พบข้อมูลบุคลากรของคุณ');
+  const merged = Object.assign({},profile,clean);
+  const sync = syncStaffNameReferences_(profile,merged,ctx);
   audit_(ctx,'UPDATE_SELF_PROFILE','STAFF',profile.StaffID,'แก้ไขข้อมูลบุคลากรของตนเอง');
   const updated = rowsAsObjects_('STAFF').find(row => String(row.StaffID) === String(profile.StaffID));
-  return {ok:true,id:profile.StaffID,data:safeStaffRecord_(updated || Object.assign({},profile,clean))};
+  return {ok:true,id:profile.StaffID,data:safeStaffRecord_(updated || merged),sync:sync};
+}
+
+function staffFullName_(staff) {
+  if (!staff) return '';
+  return (String(staff.Prefix || '')+String(staff.FirstName || '')+' '+String(staff.LastName || '')).replace(/\s+/g,' ').trim();
+}
+
+function staffNameAliasesForSync_(staff, user) {
+  if (!staff) return [];
+  return [
+    staff.FirstName,
+    (String(staff.FirstName || '')+' '+String(staff.LastName || '')).trim(),
+    staffFullName_(staff),
+    user && user.DisplayName,
+    user && user.Username
+  ].map(normalizeAssignee_).filter(Boolean);
+}
+
+function replaceExactStaffName_(sheetName, fieldName, aliases, newName, ctx) {
+  const sheet = getSheet_(sheetName), lastRow = sheet.getLastRow(), lastCol = sheet.getLastColumn();
+  if (lastRow < 2 || lastCol < 1) return 0;
+  const range = sheet.getRange(1,1,lastRow,lastCol), values = range.getValues(), headers = values[0].map(String), fieldCol = headers.indexOf(fieldName);
+  if (fieldCol < 0) return 0;
+  const updatedAtCol = headers.indexOf('UpdatedAt'), updatedByCol = headers.indexOf('UpdatedBy'), aliasSet = new Set(aliases), now = new Date();
+  let changed = 0;
+  for (let row=1;row<values.length;row++) {
+    const normalized = normalizeAssignee_(values[row][fieldCol]);
+    if (!normalized || !aliasSet.has(normalized)) continue;
+    if (String(values[row][fieldCol] || '').trim() === newName) continue;
+    values[row][fieldCol] = newName;
+    if (updatedAtCol >= 0) values[row][updatedAtCol] = now;
+    if (updatedByCol >= 0) values[row][updatedByCol] = ctx.username;
+    changed++;
+  }
+  if (changed) {
+    sheet.getRange(2,1,lastRow-1,lastCol).setValues(values.slice(1));
+    clearDataCache_(sheetName);
+  }
+  return changed;
+}
+
+function invalidateUserAuthCache_(userId) {
+  if (!userId) return;
+  const keys = [];
+  rowsAsObjects_('SESSIONS').forEach(session => {
+    if (String(session.UserID || '') === String(userId) && String(session.Status || '').toLowerCase() === 'active') {
+      keys.push(authCacheKey_(session.Token));
+    }
+  });
+  if (keys.length) CacheService.getScriptCache().removeAll(keys);
+}
+
+function syncStaffNameReferences_(before, after, ctx) {
+  const wasCg = String(before && before.Role || '').trim().toLowerCase() === 'cg';
+  const isCg = String(after && after.Role || '').trim().toLowerCase() === 'cg';
+  const newName = staffFullName_(after);
+  if ((!wasCg && !isCg) || !newName) return {updated:0};
+
+  const users = rowsAsObjects_('USERS');
+  let linkedUser = users.find(user => String(user.UserID || '') === String(after.UserID || before.UserID || '')) || null;
+  const preliminaryAliases = [...new Set(staffNameAliasesForSync_(before,linkedUser).concat(staffNameAliasesForSync_(after,linkedUser)))];
+  if (!linkedUser) {
+    const candidates = users.filter(user => String(user.Role || '').trim().toLowerCase() === 'cg' && [user.DisplayName,user.Username].map(normalizeAssignee_).some(name => preliminaryAliases.includes(name)));
+    if (candidates.length === 1) linkedUser = candidates[0];
+  }
+  const aliases = [...new Set(preliminaryAliases.concat(staffNameAliasesForSync_(before,linkedUser),staffNameAliasesForSync_(after,linkedUser)))];
+  const counts = {
+    patients:replaceExactStaffName_('PATIENTS','CG',aliases,newName,ctx),
+    visits:replaceExactStaffName_('VISITS','Visitor',aliases,newName,ctx),
+    assessments:replaceExactStaffName_('ASSESSMENTS','Assessor',aliases,newName,ctx),
+    carePlans:replaceExactStaffName_('CARE_PLANS','Responsible',aliases,newName,ctx),
+    alerts:replaceExactStaffName_('ALERTS','AssignedTo',aliases,newName,ctx)
+  };
+  if (linkedUser) {
+    updateById_('USERS','UserID',linkedUser.UserID,{DisplayName:newName,UpdatedAt:new Date()});
+    if (!after.UserID) updateById_('STAFF','StaffID',after.StaffID,{UserID:linkedUser.UserID,UpdatedAt:new Date(),UpdatedBy:ctx.username});
+    invalidateUserAuthCache_(linkedUser.UserID);
+  }
+  const updated = Object.values(counts).reduce((sum,count) => sum+count,0);
+  clearDashboardCaches_();
+  audit_(ctx,'SYNC_STAFF_NAME','STAFF',after.StaffID,'ชื่อใหม่ '+newName+'; อัปเดตข้อมูลอ้างอิง '+updated+' รายการ');
+  return {updated:updated,counts:counts,userUpdated:!!linkedUser,name:newName};
+}
+
+function saveStaff_(data, ctx) {
+  if (!data || typeof data !== 'object') throw new Error('ข้อมูลบุคลากรไม่ถูกต้อง');
+  const staffId = String(data.StaffID || '').trim();
+  const before = staffId ? rowsAsObjects_('STAFF').find(row => String(row.StaffID) === staffId) : null;
+  const result = saveRecord_('STAFF','StaffID','ST',data,ctx);
+  if (!before) return result;
+  const after = Object.assign({},before,result.data);
+  result.sync = syncStaffNameReferences_(before,after,ctx);
+  const updated = rowsAsObjects_('STAFF').find(row => String(row.StaffID) === String(result.id));
+  if (updated) result.data = safeStaffRecord_(updated);
+  return result;
+}
+
+function syncAllCgNames() {
+  const ctx = {username:'system',role:'admin',ip:''};
+  const totals = {staff:0,updated:0};
+  rowsAsObjects_('STAFF').filter(staff => String(staff.Role || '').trim().toLowerCase() === 'cg').forEach(staff => {
+    const result = syncStaffNameReferences_(staff,staff,ctx);
+    totals.staff++;
+    totals.updated += Number(result.updated || 0);
+  });
+  SpreadsheetApp.getUi().alert('ซิงก์ชื่อ CG สำเร็จ', 'ตรวจสอบ CG '+totals.staff+' คน และปรับข้อมูลอ้างอิง '+totals.updated+' รายการ', SpreadsheetApp.getUi().ButtonSet.OK);
+  return totals;
 }
 
 function getRecord_(sheetName, id, ctx) {
