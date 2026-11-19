@@ -6,7 +6,7 @@
  */
 
 const APP = {
-  VERSION: '1.22.6',
+  VERSION: '1.22.7',
   TZ: 'Asia/Bangkok',
   SESSION_HOURS: 8,
   DEFAULT_ADMIN: 'admin',
