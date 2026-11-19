@@ -6,7 +6,7 @@
  */
 
 const APP = {
-  VERSION: '1.22.5',
+  VERSION: '1.22.6',
   TZ: 'Asia/Bangkok',
   SESSION_HOURS: 8,
   DEFAULT_ADMIN: 'admin',
@@ -70,6 +70,7 @@ const CONTRACT_MASTER_DEFAULTS = {
 const CONTRACT_MASTER_KEYS = Object.keys(CONTRACT_MASTER_DEFAULTS);
 
 const DEFAULT_CG_USERS = ['งามฉัตร','สุลาวรรณ','บุญจัน','สันดอน','อัมพร','แสงจันทร์','จงกล','ศิราณี'];
+const EXTRA_CG_USERS = [{username:'อำพร',displayName:'อำพร น้อมมนัส'}];
 const MONTHLY_VISIT_TARGETS = {'1':2,'2':4,'3':4,'4':8};
 
 function onOpen() {
@@ -119,6 +120,7 @@ function ensureSystemReady_() {
   else {
     clearSensitiveStaffData_();
     backfillPatientGroups_();
+    seedCgUsers_(false);
   }
   cache.put(readyCacheKey_(), '1', PERFORMANCE.READY_TTL);
 }
@@ -202,7 +204,7 @@ function route_(action, payload, event) {
     case 'dashboard': return dashboard_(ctx, false, payload.month);
     case 'listPatients': return listRecords_('PATIENTS', payload, ctx);
     case 'getPatient': return getRecord_('PATIENTS', payload.id, ctx);
-    case 'savePatient': requireRole_(ctx, ['admin','manager','cm']); return saveRecord_('PATIENTS', 'PatientID', 'PT', payload.data, ctx);
+    case 'savePatient': return savePatient_(payload.data, ctx);
     case 'deletePatient': return archiveRecord_('PATIENTS', 'PatientID', payload.id, ctx);
     case 'listVisits': return listRecords_('VISITS', payload, ctx);
     case 'saveVisit': return saveVisit_(payload.data, ctx);
@@ -729,6 +731,26 @@ function getRecord_(sheetName, id, ctx) {
   return {ok:true,data:row};
 }
 
+function savePatient_(data, ctx) {
+  if (!data || typeof data !== 'object') throw new Error('ข้อมูลผู้ป่วยไม่ถูกต้อง');
+  const role = String(ctx && ctx.role || '').trim().toLowerCase();
+  if (!['admin','manager','cm','cg'].includes(role)) throw new Error('คุณไม่มีสิทธิ์บันทึกข้อมูลผู้ป่วย');
+  if (!isCg_(ctx)) return saveRecord_('PATIENTS','PatientID','PT',data,ctx);
+
+  const allowed = ['PatientID','CitizenID','Prefix','FirstName','LastName','BirthDate','Age','Sex','Phone','Address','Village','Subdistrict','District','Province','CareRight','ADLScore','PatientGroup','DependencyLevel','RiskLevel','Status','PrimaryCaregiver','CaregiverPhone','Diseases','DrugAllergy','Medications','StartDate','NextVisit','Consent','Notes'];
+  const clean = sanitizeObject_(data,allowed), existingId = String(clean.PatientID || '').trim();
+  if (existingId) {
+    const existing = rowsAsObjects_('PATIENTS').find(patient => String(patient.PatientID) === existingId);
+    if (!existing) throw new Error('ไม่พบข้อมูลผู้ป่วย');
+    assertPatientAccess_(existing.PatientID,ctx);
+  }
+  const cgName = visitorNameForCtx_(ctx);
+  if (!cgName) throw new Error('ไม่พบชื่อ CG ของบัญชีนี้ กรุณากรอกข้อมูลส่วนตัว CG ก่อน');
+  clean.CG = cgName;
+  if (!existingId && !clean.Status) clean.Status = 'กำลังดูแล';
+  return saveRecord_('PATIENTS','PatientID','PT',clean,ctx);
+}
+
 function savePatientLinkedRecord_(sheetName, idField, prefix, data, ctx) {
   if (!data || !data.PatientID) throw new Error('กรุณาเลือกผู้ป่วย');
   assertPatientAccess_(data.PatientID,ctx);
@@ -1236,8 +1258,10 @@ function seedCgUsers_(markExistingForFirstLogin) {
     map[String(user.Username || '').trim().toLowerCase()] = user;
     return map;
   },{});
-  DEFAULT_CG_USERS.forEach(displayName => {
-    const username = String(displayName).trim().toLowerCase();
+  const accounts = DEFAULT_CG_USERS.map(name => ({username:name,displayName:name})).concat(EXTRA_CG_USERS);
+  accounts.forEach(account => {
+    const username = String(account.username || '').trim().toLowerCase(), displayName = String(account.displayName || account.username || '').trim();
+    if (!username || !displayName) return;
     const current = usersByUsername[username];
     if (current) {
       if (markExistingForFirstLogin) updateById_('USERS','UserID',current.UserID,{Role:'cg',Status:'active',MustChangePassword:true,UpdatedAt:new Date()});
